@@ -1,0 +1,7 @@
+node_modules
+.env*
+data
+*.p8
+*.p12
+.git
+*.zip

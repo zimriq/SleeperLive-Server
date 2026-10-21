@@ -1,0 +1,22 @@
+{
+  "name": "sleeperlive-server",
+  "version": "1.0.0",
+  "description": "Sleeper matchup polling and Live Activity push server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "test": "node --test",
+    "backup": "node --env-file-if-exists=.env backup.js",
+    "test:load": "node scripts/benchmark.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
