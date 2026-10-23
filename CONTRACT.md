@@ -100,3 +100,9 @@ prefer server pushes for active activities rather than racing local/push updates
 Show ActivityViewContext.isStale in the widget. Starting and ending must handle
 Live Activities disabled, missing tokens, user dismissal, registration failure,
 and the eight-hour lifecycle. Polling does not mean guaranteed 75-second delivery.
+
+## Automatic enrollment (disabled by default)
+
+See [ENROLLMENT.md](ENROLLMENT.md) for the App Attest challenge/completion contract,
+client-generated credentials, retry behavior and staged rollout. Existing invite
+registration and bearer-authenticated endpoints retain their current contract.

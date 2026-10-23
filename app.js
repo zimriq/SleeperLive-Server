@@ -1,4 +1,5 @@
 import express from 'express';
+import { enrollmentRouter } from './enrollment.js';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { snapshot } from './sleeper.js';
 const hash = text=>createHash('sha256').update(text).digest('hex');
@@ -6,13 +7,15 @@ const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(
 const fail=(status,error)=>Object.assign(new Error(error),{status});
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), hits=new Map();
-  app.disable('x-powered-by');app.set('trust proxy',1);app.use(express.json({limit:'8kb'}));
+  app.disable('x-powered-by');app.set('trust proxy',1);
   function limit(key,max){
     const t=now();
     for(const [k,v] of hits)if(v.until<t)hits.delete(k);
     if(!hits.has(key)){if(hits.size>=5000)throw fail(429,'rate_limited');hits.set(key,{n:0,until:t+60000});}
     if(++hits.get(key).n>max)throw fail(429,'rate_limited');
   }
+  app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));
+  app.use(express.json({limit:'8kb'}));
   app.get('/health',(_,res)=>res.json({ok:true,mode:cfg.mode,poller:poller?.status()}));
   app.post('/v1/devices',(req,res)=>{
     limit(`ip:${req.ip}`,10);
