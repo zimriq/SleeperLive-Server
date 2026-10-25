@@ -22,8 +22,11 @@ export function config(env = process.env) {
     maxDevices: number('MAX_DEVICES', 50, 1, 1000), maxActivities: number('MAX_ACTIVITIES', 100, 1, 1000),
     perDevice: number('MAX_ACTIVITIES_PER_DEVICE', 3, 1, 10),
     bundleId: env.APNS_BUNDLE_ID, teamId: env.APNS_TEAM_ID, keyId: env.APNS_KEY_ID,
+    productionKeyId: env.APNS_PRODUCTION_KEY_ID,
+    productionKey: env.APNS_PRODUCTION_KEY_FILE ? readFileSync(env.APNS_PRODUCTION_KEY_FILE, 'utf8') : env.APNS_PRODUCTION_KEY_P8?.replaceAll('\\n', '\n'),
     key: env.APNS_KEY_FILE ? readFileSync(env.APNS_KEY_FILE, 'utf8') : env.APNS_KEY_P8?.replaceAll('\\n', '\n'),
   };
+  if (Boolean(c.productionKeyId) !== Boolean(c.productionKey)) throw new Error('Set both APNS_PRODUCTION_KEY_ID and APNS_PRODUCTION_KEY_P8 (or FILE)');
   if (mode === 'live' && (!c.bundleId || !c.teamId || !c.keyId || !c.key)) throw new Error('Missing APNs credentials');
   if (c.attestEnabled && (!/^[A-Z0-9]{10}$/.test(c.attestAppIdPrefix ?? '') || !c.bundleId)) throw new Error('Set APP_ATTEST_APP_ID_PREFIX and APNS_BUNDLE_ID');
   return c;

@@ -1,7 +1,6 @@
 # Automatic enrollment — server checkpoint
 
-Status: server implemented and locally tested; disabled by default. The iOS client
-and a real Apple attestation test are still required. Do not enable on Railway yet.
+Status: server and iOS client implemented; local server tests and the iOS development build pass. A real Apple attestation test and TestFlight push test remain required. Enrollment is disabled by default.
 Existing invite enrollment, device credentials, and Live Activities continue working.
 
 ## Configuration
@@ -12,9 +11,9 @@ Existing invite enrollment, device credentials, and Live Activities continue wor
 - `APP_ATTEST_ALLOW_DEVELOPMENT=false`: production-only by default. TestFlight uses
   production App Attest. APNs environment is a separate setting.
 - Existing `MAX_DEVICES` applies to BOTH invitation and automatic registrations.
-  No configuration change, deployment, or secret rotation is part of this checkpoint.
+  Existing registrations count toward this limit.
 
-## Client contract for the next checkpoint
+## Client contract
 
 1. Generate an App Attest key and a cryptographically random 32-byte device secret.
    Encode the secret as 64 lowercase hex characters. Persist pending state securely
@@ -64,9 +63,7 @@ configuration and compatibility with the existing API. State-transition success
 cases inject a test verifier; the actual Apple verifier has malformed-input and
 untrusted-certificate rejection tests. These do not establish real-device success.
 
-Next: implement the iPhone flow, configure its entitlement, test an authentic
-attestation and failed/retried registration on a physical device, then enable on
-Railway deliberately. Keep the current invite path until migration is proven.
+Next: configure the verified App ID prefix and enable enrollment on Railway for a controlled physical-device test. Test authentic attestation and failed/retried registration. Keep the current invite path until migration is proven.
 
 Verification dependency: pinned `node-app-attest` plus bounded `cbor` decoding;
 additional checks enforce certificate validity dates, chain ordering, CA status,
@@ -76,3 +73,19 @@ References:
 - https://developer.apple.com/documentation/devicecheck/validating-apps-that-connect-to-your-server
 - https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity
 - https://github.com/uebelack/node-app-attest
+
+## TestFlight production pushes
+
+Keep APNS_KEY_ID and APNS_KEY_P8 as the existing sandbox credentials. Add
+APNS_PRODUCTION_KEY_ID and APNS_PRODUCTION_KEY_P8 for the production key.
+For local use, APNS_PRODUCTION_KEY_FILE can supply a private file path instead.
+Never commit either private key. Production activities select the production
+signer; development activities keep the original signer. Without the optional
+production pair, the existing single-key behavior is preserved.
+
+GET /v1/devices/me requires bearer authentication and returns only deviceId,
+with Cache-Control: no-store. The client uses it to recover a committed enrollment
+after a lost response, even after the challenge expires or the server restarts.
+
+Validation: 36 server tests pass, including environment-specific JWT signatures
+and authenticated recovery. These are not proof of Apple accepting either key.

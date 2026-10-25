@@ -15,20 +15,24 @@ export function classify(status, reason) {
 }
 export function createAPNs(cfg, now = Date.now) {
   if (cfg.mode === 'dry-run') return { async send(message) { return {kind:'ok', dryRun:true}; }, close() {} };
-  const key = createPrivateKey(cfg.key);
-  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error('APNs requires a P-256 private key');
-  let jwt, signedAt = 0;
-  const sessions = new Map();
-  function authorization() {
-    const t = Math.floor(now()/1000);
-    if (!jwt || t-signedAt >= 2700) {
-      const enc = value => Buffer.from(JSON.stringify(value)).toString('base64url');
-      const input = `${enc({alg:'ES256',kid:cfg.keyId})}.${enc({iss:cfg.teamId,iat:t})}`;
-      jwt = `${input}.${sign('sha256', Buffer.from(input), {key,dsaEncoding:'ieee-p1363'}).toString('base64url')}`;
-      signedAt = t;
-    }
-    return `bearer ${jwt}`;
+  function signer(pem, keyId) {
+    const key = createPrivateKey(pem);
+    if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error('APNs requires a P-256 private key');
+    let jwt, signedAt = 0;
+    return () => {
+      const t = Math.floor(now()/1000);
+      if (!jwt || t-signedAt >= 2700) {
+        const enc = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+        const input = `${enc({alg:'ES256',kid:keyId})}.${enc({iss:cfg.teamId,iat:t})}`;
+        jwt = `${input}.${sign('sha256', Buffer.from(input), {key,dsaEncoding:'ieee-p1363'}).toString('base64url')}`;
+        signedAt = t;
+      }
+      return `bearer ${jwt}`;
+    };
   }
+  const defaultAuthorization = signer(cfg.key, cfg.keyId);
+  const productionAuthorization = cfg.productionKey ? signer(cfg.productionKey, cfg.productionKeyId) : defaultAuthorization;
+  const sessions = new Map();
   function session(env) {
     const host = env === 'development' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com';
     let s = sessions.get(host);
@@ -49,7 +53,7 @@ export function createAPNs(cfg, now = Date.now) {
           const timer = setTimeout(()=>{finish({kind:'retry',reason:'Timeout'});req?.close();},12000);
           try {
             req=session(message.env).request({':method':'POST',':path':`/3/device/${message.token}`,
-              authorization:authorization(),'apns-topic':`${cfg.bundleId}.push-type.liveactivity`,
+              authorization:message.env === 'development' ? defaultAuthorization() : productionAuthorization(),'apns-topic':`${cfg.bundleId}.push-type.liveactivity`,
               'apns-push-type':'liveactivity','apns-priority':pushPriority(message),
               'apns-expiration':String(Math.floor(now()/1000)+300),'content-type':'application/json'});
             req.setEncoding('utf8'); req.on('response', h=>{status=h[':status'];});

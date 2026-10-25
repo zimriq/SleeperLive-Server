@@ -209,3 +209,12 @@ test('failed urgent push retries the latest score urgently without advancing acc
     time+=225;await poll.tick();assert.equal(pushPriority(sent.at(-1)),'5');
   } finally {store.close();}
 });
+
+test('device recovery requires valid credentials and does not expose secrets',async t=>{
+  const f=await fixture(t);
+  assert.equal((await f.call('/v1/devices/me')).status,401);
+  const response=await f.call('/v1/devices/me','GET',undefined,f.token);
+  assert.equal(response.status,200);
+  assert.equal(response.headers.get('cache-control'),'no-store');
+  assert.deepEqual(await response.json(),{deviceId:f.token.split('.')[0]});
+});

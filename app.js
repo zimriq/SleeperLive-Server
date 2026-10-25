@@ -79,6 +79,9 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endedAt=seconds();a.token=null;a.version++;}});
     res.status(204).end();
   });
+  app.get('/v1/devices/me',(req,res)=>{
+    res.set('Cache-Control','no-store').json({deviceId:req.deviceId});
+  });
   app.delete('/v1/devices/me',(req,res)=>{
     store.change(s=>{s.devices[req.deviceId].revoked=true;for(const a of Object.values(s.activities))if(a.deviceId===req.deviceId&&a.status==='active'){a.status='ending';a.version++;a.nextAttempt=0;}});
     res.status(204).end();
