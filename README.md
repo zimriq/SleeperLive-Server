@@ -56,6 +56,16 @@ also change the baseline. Do not present it as injury-aware or promise Yahoo par
 Real-game testing has been reported successful, but does not establish prediction
 accuracy. Feed failure hides projections while actual scores keep updating.
 
+Projection feed failures or invalid responses trigger a shared 60-second retry
+cooldown, starting when all requests in the failed batch settle. During that time,
+requests needing new feed data return unavailable estimates without fetching again;
+a still-fresh cached snapshot can continue serving its matching season/week.
+Expired estimates are not reused. Only one feed batch runs at a time, and the
+cooldown applies across leagues and weeks to prevent repeated failed fetches.
+The next request after the cooldown can retry automatically; no background retry
+is scheduled. Actual scores remain available even when estimates are unavailable.
+The cooldown is in memory and resets if the process restarts.
+
 ## Reliability and limits
 
 - Poll interval is 60–90 seconds (75 default), measured after each run finishes.
