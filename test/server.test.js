@@ -19,7 +19,7 @@ const sleeper={matchups:async()=>({rows,updatedAt:T}),meta:async()=>meta};
 const registration={leagueId:'123456789',week:6,rosterId:1,pushToken:'aa'.repeat(32),apnsEnvironment:'development',startedAt:T};
 function activity(overrides={}) {return {id:'activity-1',deviceId:'d',leagueId:'123456789',week:6,rosterId:1,token:'aa',env:'development',status:'active',version:1,expiresAt:T+28800,startedAt:T,nextAttempt:0,failures:0,force:true,state:{yourScore:0,opponentScore:0,yourProjected:null,opponentProjected:null,yourProjectionKind:'unavailable',opponentProjectionKind:'unavailable',updatedAt:T},...overrides};}
 async function fixture(t,options={}){
-  const store=openStore(':memory:');const app=createApp({store,sleeper,...options,cfg:{...cfg,...options.cfg},now:()=>T*1000});
+  const store=openStore(':memory:');const app=createApp({store,sleeper,...options,cfg:{...cfg,...options.cfg},now:options.now??(()=>T*1000)});
   const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.on('listening',r));
   t.after(async()=>{await new Promise(r=>server.close(r));store.close();});
   const root=`http://127.0.0.1:${server.address().port}`;
@@ -241,4 +241,73 @@ test('compressed JSON and trailing bytes are rejected before enrollment or activ
   assert.deepEqual(f.store.read(),before,'rejected requests must not change registrations');
   assert.equal((await f.call('/health')).status,200,'server remains responsive');
   assert.equal((await f.call('/v1/activities/plain-json-test','PUT',registration,f.token)).status,201,'plain JSON still registers an activity');
+});
+
+
+test('ingress limits rotating invalid tokens before database reads and resets at expiry',async t=>{
+  let time=T*1000;
+  const f=await fixture(t,{now:()=>time});
+  let reads=0;
+  const read=f.store.read;
+  f.store.read=()=>{reads++;return read();};
+  // The fixture's enrollment used one of this IP's 400 admissions.
+  for(let i=0;i<399;i++){
+    const token=i.toString(16).padStart(32,'0')+'.'+'a'.repeat(64);
+    assert.equal((await f.call('/v1/devices/me','GET',undefined,token)).status,401);
+  }
+  assert.equal(reads,399);
+  const blocked=await f.call('/v1/devices/me','GET',undefined,f.token);
+  assert.equal(blocked.status,429);
+  assert.equal(blocked.headers.get('retry-after'),'60');
+  assert.equal(blocked.headers.get('cache-control'),'no-store');
+  assert.deepEqual(await blocked.json(),{error:'rate_limited'});
+  assert.equal(reads,399,'blocked valid or invalid credentials must not read SQLite');
+  // Even malformed JSON is rejected by ingress before the parser or enrollment.
+  for(const path of ['/v1/devices','/v1/enrollment/challenge']){
+    const response=await fetch(f.root+path,{method:'POST',headers:{'content-type':'application/json'},body:'{'});
+    assert.equal(response.status,429);
+  }
+  assert.equal((await f.call('/health')).status,200);
+  assert.equal(reads,399);
+  time+=59000;
+  assert.equal((await f.call('/v1/devices/me')).headers.get('retry-after'),'1');
+  time+=1000;
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200);
+  assert.equal(reads,400);
+});
+
+test('global ingress budget bounds rotating IPs and recovers without database work',async t=>{
+  let time=T*1000;
+  const f=await fixture(t,{now:()=>time});
+  let reads=0;
+  const read=f.store.read;
+  f.store.read=()=>{reads++;return read();};
+  // Exercise the existing one-proxy address policy; this is not a Railway proxy audit.
+  for(let i=0;i<1199;i++){
+    const res=await fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-for':`2001:db8::${(i+1).toString(16)}`}});
+    assert.equal(res.status,401);
+  }
+  const res=await fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-for':'192.0.2.1'}});
+  assert.equal(res.status,429);
+  assert.equal(reads,0,'missing credentials and globally blocked requests do not read SQLite');
+  time+=60000;
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200);
+});
+
+test('twelve devices sharing an IP retain their individual authenticated budgets',async t=>{
+  let time=T*1000;
+  const f=await fixture(t,{now:()=>time});
+  const tokens=[f.token];
+  // Respect the existing invitation limit while creating the test devices.
+  for(let i=1;i<12;i++){
+    if(i===10)time+=60001;
+    const res=await f.call('/v1/devices','POST',{inviteCode:cfg.invite});
+    assert.equal(res.status,201);
+    tokens.push((await res.json()).deviceToken);
+  }
+  time+=60001;
+  for(const token of tokens){
+    for(let i=0;i<30;i++)assert.equal((await f.call('/v1/devices/me','GET',undefined,token)).status,200);
+    assert.equal((await f.call('/v1/devices/me','GET',undefined,token)).status,429);
+  }
 });
