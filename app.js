@@ -15,7 +15,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     if(++hits.get(key).n>max)throw fail(429,'rate_limited');
   }
   app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));
-  app.use(express.json({limit:'8kb'}));
+  app.use(express.json({limit:'8kb',inflate:false}));
   app.get('/health',(_,res)=>res.json({ok:true,mode:cfg.mode,poller:poller?.status()}));
   app.post('/v1/devices',(req,res)=>{
     limit(`ip:${req.ip}`,10);

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,7 +27,7 @@ async function fixture(t,options={}){
     return fetch(root+path,{method,headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
   }
   const auth=await (await call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
-  return {store,call,token:auth.deviceToken};
+  return {store,call,root,token:auth.deviceToken};
 }
 
 test('SQLite survives close/reopen and rolls back failed mutations',()=>{
@@ -217,4 +218,27 @@ test('device recovery requires valid credentials and does not expose secrets',as
   assert.equal(response.status,200);
   assert.equal(response.headers.get('cache-control'),'no-store');
   assert.deepEqual(await response.json(),{deviceId:f.token.split('.')[0]});
+});
+
+
+test('compressed JSON and trailing bytes are rejected before enrollment or activity writes',async t=>{
+  const f=await fixture(t,{cfg:{attestEnabled:true}});
+  const before=f.store.read();
+  for(const [encoding,compress] of [['gzip',gzipSync],['deflate',deflateSync],['br',brotliCompressSync]]){
+    for(const trailing of [false,true]){
+      for(const [path,method,body,token] of [
+        ['/v1/devices','POST',{inviteCode:cfg.invite},null],
+        ['/v1/enrollment/challenge','POST',{keyId:Buffer.alloc(32).toString('base64'),credentialHash:'a'.repeat(64)},null],
+        ['/v1/activities/compression-test','PUT',registration,f.token],
+      ]){
+        const frame=compress(Buffer.from(JSON.stringify(body)));
+        const res=await fetch(f.root+path,{method,headers:{'content-type':'application/json','content-encoding':encoding,...(token?{authorization:`Bearer ${token}`}:{})},body:trailing?Buffer.concat([frame,Buffer.from('invalid-trailing-bytes')]):frame});
+        assert.equal(res.status,415,`${encoding} trailing=${trailing} ${path}`);
+        assert.equal((await res.json()).error,'encoding.unsupported');
+      }
+    }
+  }
+  assert.deepEqual(f.store.read(),before,'rejected requests must not change registrations');
+  assert.equal((await f.call('/health')).status,200,'server remains responsive');
+  assert.equal((await f.call('/v1/activities/plain-json-test','PUT',registration,f.token)).status,201,'plain JSON still registers an activity');
 });
