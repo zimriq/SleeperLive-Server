@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -12,7 +13,7 @@ import { payload, classify, pushPriority } from '../apns.js';
 import { config } from '../config.js';
 import { estimateTeam, projectedPoints, gameProgress } from '../projections.js';
 const T=1800000000;
-const cfg={invite:'a-very-long-test-invite-secret',maxDevices:50,maxActivities:100,perDevice:3,mode:'dry-run'};
+const cfg={inviteEnabled:true,invite:'a-very-long-test-invite-secret',maxDevices:50,maxActivities:100,perDevice:3,mode:'dry-run'};
 const meta={info:{name:'League',season:'2026'},rosters:[{roster_id:1,owner_id:'u1'},{roster_id:2,owner_id:'u2'}],users:[{user_id:'u1',metadata:{team_name:'Rigo FC'}},{user_id:'u2',display_name:'Opponent'}]};
 const rows=[{roster_id:1,matchup_id:1,points:10},{roster_id:2,matchup_id:1,points:20}];
 const sleeper={matchups:async()=>({rows,updatedAt:T}),meta:async()=>meta};
@@ -310,4 +311,50 @@ test('twelve devices sharing an IP retain their individual authenticated budgets
     for(let i=0;i<30;i++)assert.equal((await f.call('/v1/devices/me','GET',undefined,token)).status,200);
     assert.equal((await f.call('/v1/devices/me','GET',undefined,token)).status,429);
   }
+});
+
+
+test('invite enrollment policy defaults closed with App Attest and validates explicit overrides',()=>{
+  const attested={APP_ATTEST_ENABLED:'true',APP_ATTEST_APP_ID_PREFIX:'ABCDEFGHIJ',APNS_BUNDLE_ID:'com.example.test'};
+  assert.equal(config(attested).inviteEnabled,false,'attested enrollment needs no invite secret');
+  assert.equal(config({...attested,INVITE_CODE:cfg.invite}).inviteEnabled,false,'a leftover secret cannot enable the route');
+  assert.equal(config({INVITE_CODE:cfg.invite}).inviteEnabled,true,'private local mode remains compatible');
+  assert.equal(config({INVITE_ENROLLMENT_ENABLED:'false'}).inviteEnabled,false);
+  assert.throws(()=>config({INVITE_CODE:cfg.invite,INVITE_ENROLLMENT_ENABLED:'yes'}));
+  assert.throws(()=>config({...attested,INVITE_ENROLLMENT_ENABLED:'true'}));
+  assert.equal(config({...attested,INVITE_ENROLLMENT_ENABLED:'true',INVITE_CODE:cfg.invite}).inviteEnabled,true);
+});
+
+test('disabled invite enrollment does not access storage or invalidate existing credentials',async t=>{
+  const store=openStore(':memory:');
+  const id='b'.repeat(32),secret='c'.repeat(64);
+  store.change(s=>s.devices[id]={hash:createHash('sha256').update(secret).digest('hex'),createdAt:T});
+  let reads=0,writes=0;
+  const observed={read:()=>{reads++;return store.read();},change:fn=>{writes++;return store.change(fn);}};
+  const app=createApp({cfg:{...cfg,inviteEnabled:false,attestEnabled:true},store:observed,sleeper,now:()=>T*1000});
+  const server=app.listen(0,'127.0.0.1');
+  await new Promise(r=>server.on('listening',r));
+  t.after(async()=>{await new Promise(r=>server.close(r));store.close();});
+  const root=`http://127.0.0.1:${server.address().port}`;
+  for(const inviteCode of [cfg.invite,'wrong']){
+    const res=await fetch(root+'/v1/devices',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({inviteCode})});
+    assert.equal(res.status,404);
+    assert.equal(res.headers.get('cache-control'),'no-store');
+    assert.deepEqual(await res.json(),{error:'not_found'});
+  }
+  assert.equal(reads,0);assert.equal(writes,0);
+  const auth={authorization:`Bearer ${id}.${secret}`};
+  assert.equal((await fetch(root+'/v1/devices/me',{headers:auth})).status,200);
+  assert.equal((await fetch(root+'/v1/activities/existing-device-test',{method:'PUT',headers:{...auth,'content-type':'application/json'},body:JSON.stringify(registration)})).status,201);
+  assert.equal((await fetch(root+'/v1/devices/me',{method:'DELETE',headers:auth})).status,204);
+  assert.equal((await fetch(root+'/v1/devices/me',{headers:auth})).status,401);
+});
+
+test('explicit private invite enrollment works alongside App Attest and never caches credentials',async t=>{
+  const f=await fixture(t,{cfg:{attestEnabled:true,inviteEnabled:true}});
+  const res=await f.call('/v1/devices','POST',{inviteCode:cfg.invite});
+  assert.equal(res.status,201);
+  assert.equal(res.headers.get('cache-control'),'no-store');
+  const credentials=await res.json();
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,credentials.deviceToken)).status,200);
 });

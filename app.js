@@ -34,6 +34,8 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   app.use(express.json({limit:'8kb',inflate:false}));
   app.get('/health',(_,res)=>res.json({ok:true,mode:cfg.mode,poller:poller?.status()}));
   app.post('/v1/devices',(req,res)=>{
+    res.set('Cache-Control','no-store');
+    if(!(cfg.inviteEnabled ?? !cfg.attestEnabled))throw fail(404,'not_found');
     limit(`ip:${req.ip}`,10);
     if(typeof req.body?.inviteCode!=='string' || !equals(req.body.inviteCode,cfg.invite))throw fail(403,'invalid_invite');
     const id=randomBytes(16).toString('hex'), secret=randomBytes(32).toString('hex');

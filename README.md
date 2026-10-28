@@ -11,7 +11,7 @@ including live-game score updates, according to tester reports. This is function
 validation, not completion of the ongoing security review.
 
 Requires Node.js 24+ for built-in SQLite. Dependencies are Express, cbor, and
-node-app-attest. The server supports automatic App Attest enrollment, legacy private
+node-app-attest. The server supports automatic App Attest enrollment, configurable legacy private
 invite enrollment, durable registrations, token rotation, score-change pushes,
 retry backoff, activity expiry, and optional experimental estimates.
 No big-play alerts, avatars, or win probabilities are provided.
@@ -79,8 +79,8 @@ accuracy. Feed failure hides projections while actual scores keep updating.
   committing can cause a repeated update. Exactly-once delivery is not claimed.
 - Polling is single-flight; identity checks/caps are transactional. Late responses
   from a superseded token cannot mark its replacement invalid.
-- Automatic App Attest enrollment is implemented; legacy invite enrollment also
-  remains available. App Attest verifies app/device integrity, not ownership of a
+- Automatic App Attest enrollment is implemented; legacy invite enrollment is disabled by default when App Attest
+  is enabled. App Attest verifies app/device integrity, not ownership of a
   Sleeper username. Security hardening is still in progress.
 
 ## Storage and backups
@@ -127,6 +127,16 @@ Store device credentials in Keychain; never put the APNs signing key in the app.
 The app creates an ActivityKit Live Activity with pushType .token; no push-to-start.
 
 ### Legacy private enrollment
+
+`INVITE_ENROLLMENT_ENABLED` explicitly enables or disables new invitation
+registrations. If unset, it defaults to false when `APP_ATTEST_ENABLED=true`, and
+true otherwise for compatibility with private local testing. Disabled enrollment
+returns 404 even if `INVITE_CODE` is present and correct. A secret of at least 24
+characters is required only when invitation enrollment is enabled. Responses from
+this route use `Cache-Control: no-store`, including successful credential creation.
+Existing device tokens remain valid until revoked; disabling invitations does not
+interrupt their activity registration or updates. An explicit true override should
+be reserved for deliberate private testing, since it bypasses App Attest enrollment.
 
 POST /v1/devices
 Body: {"inviteCode":"the invite entered by the tester"}
@@ -270,8 +280,8 @@ Apple receipts or full attestations. No sensitive enrollment payloads are logged
 - 10 enrollment requests per IP/minute and 30 globally/minute; challenge and complete
   both count. At most 200 challenges reside in memory. Body limit is 32 KiB.
 - Device caps are checked atomically on completion, including concurrent requests.
-- Unsupported App Attest devices cannot use automatic enrollment. Existing private
-  invitation setup is retained, not silently bypassed.
+- Unsupported App Attest devices cannot use automatic enrollment. Private
+  invitation setup requires the policy above; there is no automatic fallback.
 - Attestation proves app/device integrity, not Sleeper account ownership or that a
   person was invited to TestFlight. It does not prevent a genuine app from making
   repeated installations; caps and rate limits remain necessary.

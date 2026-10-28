@@ -11,10 +11,12 @@ export function config(env = process.env) {
   };
   const mode = env.APNS_MODE ?? 'dry-run';
   if (!['dry-run', 'live'].includes(mode)) throw new Error('Invalid APNS_MODE');
-  if ((env.INVITE_CODE ?? '').length < 24) throw new Error('Set INVITE_CODE to a random secret of at least 24 characters');
+  const attestEnabled = flag('APP_ATTEST_ENABLED');
+  const inviteEnabled = env.INVITE_ENROLLMENT_ENABLED === undefined ? !attestEnabled : flag('INVITE_ENROLLMENT_ENABLED');
+  if (inviteEnabled && (env.INVITE_CODE ?? '').length < 24) throw new Error('Set INVITE_CODE to a random secret of at least 24 characters');
   const c = {
     port: number('PORT', 3000, 1, 65535), db: env.DB_PATH ?? './data/server.sqlite',
-    attestEnabled: flag('APP_ATTEST_ENABLED'),
+    attestEnabled, inviteEnabled,
     attestAllowDevelopment: flag('APP_ATTEST_ALLOW_DEVELOPMENT'),
     attestAppIdPrefix: env.APP_ATTEST_APP_ID_PREFIX,
     invite: env.INVITE_CODE, mode, projections: env.ENABLE_ESTIMATES === 'true',
