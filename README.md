@@ -172,9 +172,18 @@ counter capacity does not guarantee availability during sustained abuse.
 
 These limits include legitimate requests and can temporarily affect users sharing
 an IP or the entire service during sustained abuse. They reset on process restart,
-are per instance, and are not a distributed denial-of-service defense. IP identity
-currently relies on Express's one-hop trusted-proxy setting; the actual proxy path
-still needs verification. Rotating IPs (including IPv6 addresses) share the global
+are per instance, and are not a distributed denial-of-service defense. `CLIENT_IP_MODE=direct` (default) uses the connection peer and ignores forwarded
+headers. `railway-public` uses exactly one valid `X-Real-IP` supplied by Railway's
+HTTP edge; missing, duplicate, or malformed values fail with 400. IPv6 spelling
+variants and IPv4-mapped IPv6 addresses are normalized. Express proxy trust is off.
+Railway mode requires the listener to be reached only through the public HTTP edge
+or by trusted operators. It does not authenticate the edge: private-network callers
+and TCP/direct access can forge the header and must not be exposed to untrusted
+callers. Hostnames and other caller-supplied headers cannot establish that boundary.
+Do not enable this mode until the service's ingress paths have been checked. Local
+tests simulate sanitized headers; live Railway spoofing verification remains open.
+Sources: [Railway specs](https://docs.railway.com/networking/public-networking/specs-and-limits)
+and [staff clarification](https://station.railway.com/questions/need-authoritative-client-ip-proxy-tru-090eac86). Rotating IPs (including IPv6 addresses) share the global
 budget but are not grouped by subnet.
 
 ## HTTP API and iOS integration

@@ -1,4 +1,5 @@
 import express from 'express';
+import { clientIP } from './client-ip.js';
 import { createApiRateLimiter } from './rate-limit.js';
 import { enrollmentRouter } from './enrollment.js';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
@@ -8,21 +9,22 @@ const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(
 const fail=(status,error)=>Object.assign(new Error(error),{status});
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
-  app.disable('x-powered-by');app.set('trust proxy',1);
+  app.disable('x-powered-by');app.set('trust proxy',false);
   // Separate, bounded ingress budget: no database access or body parsing here.
   // One shared window bounds the map by the configured global admission limit, without a per-request scan.
   let ingressUntil=0, ingressTotal=0;
   const ingressIPs=new Map();
   app.use('/v1',(req,res,next)=>{
+    req.clientIP=clientIP(req,cfg.clientIPMode);
     const t=now();
     if(t>=ingressUntil){ingressUntil=t+60000;ingressTotal=0;ingressIPs.clear();}
-    const count=ingressIPs.get(req.ip)??0;
+    const count=ingressIPs.get(req.clientIP)??0;
     if(ingressTotal>=(cfg.ingressGlobal??1200) || count>=(cfg.ingressPerIP??400)){
       return res.status(429).set('Retry-After',String(Math.max(1,Math.ceil((ingressUntil-t)/1000))))
         .set('Cache-Control','no-store').json({error:'rate_limited'});
     }
     ingressTotal++;
-    ingressIPs.set(req.ip,count+1);
+    ingressIPs.set(req.clientIP,count+1);
     next();
   });
   app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));
@@ -32,7 +34,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   app.post('/v1/devices',(req,res)=>{
     res.set('Cache-Control','no-store');
     if(!(cfg.inviteEnabled ?? !cfg.attestEnabled))throw fail(404,'not_found');
-    limit(`ip:${req.ip}`,10);
+    limit(`ip:${req.clientIP}`,10);
     if(typeof req.body?.inviteCode!=='string' || !equals(req.body.inviteCode,cfg.invite))throw fail(403,'invalid_invite');
     const id=randomBytes(16).toString('hex'), secret=randomBytes(32).toString('hex');
     store.change(s=>{

@@ -25,7 +25,7 @@ async function fixture(t,options={}){
   t.after(async()=>{await new Promise(r=>server.close(r));store.close();});
   const root=`http://127.0.0.1:${server.address().port}`;
   async function call(path,method='GET',body,token){
-    return fetch(root+path,{method,headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
+    return fetch(root+path,{method,headers:{'content-type':'application/json','x-real-ip':'127.0.0.1',...(token?{authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
   }
   const auth=await (await call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
   return {store,call,root,token:auth.deviceToken};
@@ -279,16 +279,16 @@ test('ingress limits rotating invalid tokens before database reads and resets at
 
 test('global ingress budget bounds rotating IPs and recovers without database work',async t=>{
   let time=T*1000;
-  const f=await fixture(t,{now:()=>time});
+  const f=await fixture(t,{now:()=>time,cfg:{clientIPMode:'railway-public'}});
   let reads=0;
   const read=f.store.read;
   f.store.read=()=>{reads++;return read();};
-  // Exercise the existing one-proxy address policy; this is not a Railway proxy audit.
+  // Simulate edge-provided headers; this is not a live Railway proxy audit.
   for(let i=0;i<1199;i++){
-    const res=await fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-for':`2001:db8::${(i+1).toString(16)}`}});
+    const res=await fetch(f.root+'/v1/devices/me',{headers:{'x-real-ip':`2001:db8::${(i+1).toString(16)}`}});
     assert.equal(res.status,401);
   }
-  const res=await fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-for':'192.0.2.1'}});
+  const res=await fetch(f.root+'/v1/devices/me',{headers:{'x-real-ip':'192.0.2.1'}});
   assert.equal(res.status,429);
   assert.equal(reads,0,'missing credentials and globally blocked requests do not read SQLite');
   time+=60000;
@@ -392,11 +392,11 @@ test('ingress configuration keeps safe defaults and rejects invalid limits',()=>
 
 test('configured ingress budgets enforce separate IP and total limits before reads',async t=>{
   let time=T*1000;
-  const f=await fixture(t,{cfg:{ingressPerIP:2,ingressGlobal:4},now:()=>time});
+  const f=await fixture(t,{cfg:{ingressPerIP:2,ingressGlobal:4,clientIPMode:'railway-public'},now:()=>time});
   let reads=0;
   const read=f.store.read;
   f.store.read=()=>{reads++;return read();};
-  const request=ip=>fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-for':ip}});
+  const request=ip=>fetch(f.root+'/v1/devices/me',{headers:{'x-real-ip':ip}});
   // Fixture enrollment consumed one global admission on the loopback address.
   assert.equal((await request('192.0.2.1')).status,401);
   assert.equal((await request('192.0.2.1')).status,401);
@@ -468,4 +468,15 @@ test('push concurrency configuration has bounded positive integer limits',()=>{
   assert.equal(config(base).pushConcurrency,4);
   assert.equal(config({...base,APNS_MAX_CONCURRENT_SENDS:'8'}).pushConcurrency,8);
   for(const value of ['0','-1','1.5','17','NaN',''])assert.throws(()=>config({...base,APNS_MAX_CONCURRENT_SENDS:value}));
+});
+
+test('forged forwarded headers cannot rotate direct or Railway-public rate identities',async t=>{
+  for(const clientIPMode of ['direct','railway-public']){
+    const f=await fixture(t,{cfg:{clientIPMode,ingressPerIP:2,ingressGlobal:20}});
+    const headers={'x-real-ip':clientIPMode==='direct'?'192.0.2.1':'127.0.0.1','x-forwarded-for':'192.0.2.1',forwarded:'for=192.0.2.1'};
+    assert.equal((await fetch(f.root+'/v1/devices/me',{headers})).status,401);
+    headers['x-forwarded-for']='192.0.2.2';headers.forwarded='for=192.0.2.2';
+    if(clientIPMode==='direct')headers['x-real-ip']='192.0.2.2';
+    assert.equal((await fetch(f.root+'/v1/devices/me',{headers})).status,429);
+  }
 });

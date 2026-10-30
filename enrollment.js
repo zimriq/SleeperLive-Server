@@ -45,7 +45,7 @@ export function enrollmentRouter({ cfg, store, limit, now, verify = verifyAppleA
     try {
       if (!cfg.attestEnabled) throw fail(404, 'not_found');
       limit('global:enrollment', 30);
-      limit(`enrollment:${req.ip}`, 10);
+      limit(`enrollment:${req.clientIP??req.ip}`, 10);
       res.set('Cache-Control', 'no-store');
       for (const [id, challenge] of challenges) if (challenge.expiresAt <= now()) challenges.delete(id);
       next();

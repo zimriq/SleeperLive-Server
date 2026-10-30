@@ -9,6 +9,8 @@ export function config(env = process.env) {
     if (env[key] !== undefined && !['true', 'false'].includes(env[key])) throw new Error(`Invalid ${key}`);
     return env[key] === 'true';
   };
+  const clientIPMode=env.CLIENT_IP_MODE??'direct';
+  if(!['direct','railway-public'].includes(clientIPMode))throw new Error('Invalid CLIENT_IP_MODE');
   const mode = env.APNS_MODE ?? 'dry-run';
   if (!['dry-run', 'live'].includes(mode)) throw new Error('Invalid APNS_MODE');
   const attestEnabled = flag('APP_ATTEST_ENABLED');
@@ -16,7 +18,7 @@ export function config(env = process.env) {
   if (inviteEnabled && (env.INVITE_CODE ?? '').length < 24) throw new Error('Set INVITE_CODE to a random secret of at least 24 characters');
   const c = {
     port: number('PORT', 3000, 1, 65535), db: env.DB_PATH ?? './data/server.sqlite',
-    attestEnabled, inviteEnabled,
+    attestEnabled, inviteEnabled, clientIPMode,
     attestAllowDevelopment: flag('APP_ATTEST_ALLOW_DEVELOPMENT'),
     attestAppIdPrefix: env.APP_ATTEST_APP_ID_PREFIX,
     invite: env.INVITE_CODE, mode, projections: env.ENABLE_ESTIMATES === 'true',
