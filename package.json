@@ -7,7 +7,8 @@
     "start": "node --env-file-if-exists=.env server.js",
     "test": "node --test",
     "backup": "node --env-file-if-exists=.env backup.js",
-    "test:load": "node scripts/benchmark.mjs"
+    "test:load": "node scripts/benchmark.mjs",
+    "revoke-device": "node --env-file-if-exists=.env revoke-device.js"
   },
   "keywords": [],
   "author": "",

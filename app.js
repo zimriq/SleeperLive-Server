@@ -1,4 +1,5 @@
 import express from 'express';
+import { revokeDevice } from './revoke-device.js';
 import { clientIP } from './client-ip.js';
 import { createApiRateLimiter } from './rate-limit.js';
 import { enrollmentRouter } from './enrollment.js';
@@ -110,7 +111,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     res.set('Cache-Control','no-store').json({deviceId:req.deviceId});
   });
   app.delete('/v1/devices/me',(req,res)=>{
-    store.change(s=>{s.devices[req.deviceId].revoked=true;for(const a of Object.values(s.activities))if(a.deviceId===req.deviceId&&a.status==='active'){a.status='ending';a.version++;a.nextAttempt=0;}});
+    revokeDevice(store,req.deviceId);
     res.status(204).end();
   });
   app.use((req,res)=>res.status(404).json({error:'not_found'}));

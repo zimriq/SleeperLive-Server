@@ -122,11 +122,33 @@ not share state. Keep the database and its backups private.
 `data/backups`. It is a manual command, not an automatic schedule. Keep recovery
 copies separately and test restores with the server stopped.
 
+## Device revocation
+
+Users can revoke their current credential through authenticated
+`DELETE /v1/devices/me`. Operators can revoke a device without its bearer token
+using `npm run revoke-device -- --server-stopped <32-character-device-id>`.
+
+The operator command is **offline only**: stop the server process first, back up
+its database, explicitly set `DB_PATH` to that existing database, run the command,
+and restart the server. `--server-stopped` is an operator acknowledgement, not a
+process detector. Never run it against a database used by a live server: the
+running credential index would remain stale. A restarted server rebuilds the
+index and rejects the revoked credential. Do not copy database contents or tokens
+into chat or logs; the command prints only a result and activity count.
+
+Revocation retains the device/attestation-key record to block key reuse, and queues
+owned active Live Activities for end pushes. Pushes are attempted after restart;
+Apple acceptance or immediate disappearance from the phone is not guaranteed.
+Other devices are unaffected. Repeated revocation is safe. This revokes one device
+credential, not a Sleeper username or a person's ability to enroll a different key.
+No public administration endpoint or automatic record deletion is introduced.
+
 ## Source layout
 
 - `server.js`: startup and shutdown; `config.js`: environment validation.
 - `app.js`: authenticated HTTP API, request limits, and activity registration.
 - `enrollment.js`: App Attest challenges and verification.
+- `revoke-device.js`: shared revocation logic and offline operator command.
 - `rate-limit.js`: bounded fixed-window counters for the existing API limits.
 - `registrations.js`: transactional SQLite storage; `backup.js`: database backups.
 - `sleeper.js`: upstream data and caching; `projections.js`: optional estimates.
