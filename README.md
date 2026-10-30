@@ -87,7 +87,14 @@ The cooldown is in memory and resets if the process restarts.
   the server prevents subsequent work for ended activities.
 - At-least-once retry: a crash between Apple accepting a push and the database
   committing can cause a repeated update. Exactly-once delivery is not claimed.
-- Polling is single-flight; identity checks/caps are transactional. Late responses
+- Polling is single-flight; identity checks/caps are transactional.
+  Each tick processes activities with up to `APNS_MAX_CONCURRENT_SENDS` workers
+  (default 4, allowed 1–16). Workers include feed lookup and snapshot preparation,
+  so simultaneous APNs sends never exceed that bound. A slow send occupies one
+  slot; it does not stop the other slots. League/week data is fetched once per tick.
+  Queued activities are rechecked before sending; shutdown waits for active workers.
+  This changes processing concurrency, not polling frequency or Apple's delivery
+  budgets. Raising the limit needs load testing and can increase upstream concurrency. Late responses
   from a superseded token cannot mark its replacement invalid.
 - Automatic App Attest enrollment is implemented; legacy invite enrollment is disabled by default when App Attest
   is enabled. App Attest verifies app/device integrity, not ownership of a

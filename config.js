@@ -20,6 +20,7 @@ export function config(env = process.env) {
     attestAllowDevelopment: flag('APP_ATTEST_ALLOW_DEVELOPMENT'),
     attestAppIdPrefix: env.APP_ATTEST_APP_ID_PREFIX,
     invite: env.INVITE_CODE, mode, projections: env.ENABLE_ESTIMATES === 'true',
+    pushConcurrency: number('APNS_MAX_CONCURRENT_SENDS', 4, 1, 16),
     pollMs: number('POLL_SECONDS', 75, 60, 90) * 1000,
     maxDevices: number('MAX_DEVICES', 50, 1, 1000), maxActivities: number('MAX_ACTIVITIES', 100, 1, 1000),
     ingressPerIP: number('API_REQUESTS_PER_IP_PER_MINUTE', 400, 1, 10000),

@@ -407,3 +407,65 @@ test('configured ingress budgets enforce separate IP and total limits before rea
   time+=60000;
   assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200);
 });
+
+test('bounded push workers let other users progress while one send stalls; shutdown waits',async()=>{
+  const store=openStore(':memory:');
+  store.change(s=>{for(let i=0;i<6;i++)s.activities[`a${i}`]=activity({id:`a${i}`,token:`token${i}`});});
+  let release,active=0,peak=0,fetches=0;
+  const gate=new Promise(resolve=>release=resolve),sent=[];
+  const poll=createPoller({store,pushConcurrency:2,now:()=>T*1000,
+    sleeper:{...sleeper,matchups:async()=>{fetches++;return {rows,updatedAt:T};}},
+    transport:{send:async message=>{
+      active++;peak=Math.max(peak,active);sent.push(message.token);
+      try{if(message.token==='token0')await gate;return {kind:'ok'};}finally{active--;}
+    }}});
+  const tick=poll.tick();
+  try{
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(poll.tick(),tick,'another tick cannot overlap active workers');
+    assert.equal(sent.length,6,'other activities finish before the stalled send');
+    assert.equal(peak,2);assert.equal(fetches,1);
+    assert.equal(store.read().activities.a5.sentAt,T);
+    let stopped=false;
+    const stop=poll.stop().then(()=>{stopped=true;});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(stopped,false);
+    release();await tick;await stop;
+    assert.equal(active,0);assert.equal(stopped,true);
+  }finally{release();await tick;store.close();}
+});
+
+test('concurrent push failures respect token rotation, queued ending, and retry isolation',async()=>{
+  const store=openStore(':memory:');
+  store.change(s=>{for(let i=0;i<4;i++)s.activities[`a${i}`]=activity({id:`a${i}`,token:`token${i}`});});
+  let release;
+  const gate=new Promise(resolve=>release=resolve),sent=[];
+  const poll=createPoller({store,sleeper,pushConcurrency:2,now:()=>T*1000,log:()=>{},transport:{send:async message=>{
+    sent.push(message.token);
+    if(message.token==='token0'){await gate;return {kind:'dead'};}
+    if(message.token==='token1'){await gate;throw Error('test transport failure');}
+    return {kind:'ok'};
+  }}});
+  const tick=poll.tick();
+  try{
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(sent,['token0','token1']);
+    store.change(s=>{
+      s.activities.a0.token='replacement';s.activities.a0.version++;
+      s.activities.a2.status='ended';s.activities.a2.token=null;s.activities.a2.version++;
+    });
+    release();await tick;
+    const state=store.read();
+    assert.equal(state.activities.a0.status,'active');assert.equal(state.activities.a0.token,'replacement');
+    assert.equal(state.activities.a1.failures,1);assert.ok(state.activities.a1.nextAttempt>T);
+    assert.equal(sent.includes('token2'),false,'queued local end is rechecked before sending');
+    assert.equal(state.activities.a3.sentAt,T);
+  }finally{release();await tick;store.close();}
+});
+
+test('push concurrency configuration has bounded positive integer limits',()=>{
+  const base={INVITE_ENROLLMENT_ENABLED:'false'};
+  assert.equal(config(base).pushConcurrency,4);
+  assert.equal(config({...base,APNS_MAX_CONCURRENT_SENDS:'8'}).pushConcurrency,8);
+  for(const value of ['0','-1','1.5','17','NaN',''])assert.throws(()=>config({...base,APNS_MAX_CONCURRENT_SENDS:value}));
+});
