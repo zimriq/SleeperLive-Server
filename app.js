@@ -32,7 +32,8 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   });
   app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));
   app.use(express.json({limit:'8kb',inflate:false}));
-  app.get('/health',(_,res)=>res.json({ok:true,mode:cfg.mode,poller:poller?.status()}));
+  // Public liveness only. Preserve the iOS mode contract without exposing internal errors.
+  app.get('/health',(_,res)=>res.set('Cache-Control','no-store').json({ok:true,mode:cfg.mode}));
   app.post('/v1/devices',(req,res)=>{
     res.set('Cache-Control','no-store');
     if(!(cfg.inviteEnabled ?? !cfg.attestEnabled))throw fail(404,'not_found');

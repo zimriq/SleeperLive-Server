@@ -358,3 +358,18 @@ test('explicit private invite enrollment works alongside App Attest and never ca
   const credentials=await res.json();
   assert.equal((await f.call('/v1/devices/me','GET',undefined,credentials.deviceToken)).status,200);
 });
+
+
+test('public health preserves the iOS contract without exposing or consulting internal status',async t=>{
+  for(const mode of ['live','dry-run']){
+    const f=await fixture(t,{cfg:{mode},poller:{status:()=>{throw Error('private database path and credentials');}}});
+    let reads=0;
+    const read=f.store.read;
+    f.store.read=()=>{reads++;return read();};
+    const response=await f.call('/health');
+    assert.equal(response.status,200);
+    assert.equal(response.headers.get('cache-control'),'no-store');
+    assert.deepEqual(await response.json(),{ok:true,mode});
+    assert.equal(reads,0,'public liveness must not read private registrations');
+  }
+});

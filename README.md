@@ -123,6 +123,13 @@ The ingress counters are separate from enrollment and authenticated-device limit
 the IP map is bounded by the total admission budget and resets each minute.
 `/health` is outside this gate. Existing limits still apply after admission.
 
+`GET /health` is a public liveness check returning only `ok` and the APNs `mode`
+(`live` or `dry-run`), with `Cache-Control: no-store`. The iOS app uses these fields.
+It does not expose polling timestamps, raw errors, credentials, or database details.
+A successful response means the HTTP service is responding, not that the database,
+Sleeper feeds, polling loop, or Apple push delivery are healthy. It is not a
+readiness check and does not trigger database reads or upstream requests.
+
 These limits include legitimate requests and can temporarily affect users sharing
 an IP or the entire service during sustained abuse. They reset on process restart,
 are per instance, and are not a distributed denial-of-service defense. IP identity
