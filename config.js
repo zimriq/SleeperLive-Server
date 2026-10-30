@@ -22,12 +22,15 @@ export function config(env = process.env) {
     invite: env.INVITE_CODE, mode, projections: env.ENABLE_ESTIMATES === 'true',
     pollMs: number('POLL_SECONDS', 75, 60, 90) * 1000,
     maxDevices: number('MAX_DEVICES', 50, 1, 1000), maxActivities: number('MAX_ACTIVITIES', 100, 1, 1000),
+    ingressPerIP: number('API_REQUESTS_PER_IP_PER_MINUTE', 400, 1, 10000),
+    ingressGlobal: number('API_REQUESTS_PER_MINUTE', 1200, 1, 10000),
     perDevice: number('MAX_ACTIVITIES_PER_DEVICE', 3, 1, 10),
     bundleId: env.APNS_BUNDLE_ID, teamId: env.APNS_TEAM_ID, keyId: env.APNS_KEY_ID,
     productionKeyId: env.APNS_PRODUCTION_KEY_ID,
     productionKey: env.APNS_PRODUCTION_KEY_FILE ? readFileSync(env.APNS_PRODUCTION_KEY_FILE, 'utf8') : env.APNS_PRODUCTION_KEY_P8?.replaceAll('\\n', '\n'),
     key: env.APNS_KEY_FILE ? readFileSync(env.APNS_KEY_FILE, 'utf8') : env.APNS_KEY_P8?.replaceAll('\\n', '\n'),
   };
+  if (c.ingressPerIP > c.ingressGlobal) throw new Error('API_REQUESTS_PER_IP_PER_MINUTE must not exceed API_REQUESTS_PER_MINUTE');
   if (Boolean(c.productionKeyId) !== Boolean(c.productionKey)) throw new Error('Set both APNS_PRODUCTION_KEY_ID and APNS_PRODUCTION_KEY_P8 (or FILE)');
   if (mode === 'live' && (!c.bundleId || !c.teamId || !c.keyId || !c.key)) throw new Error('Missing APNs credentials');
   if (c.attestEnabled && (!/^[A-Z0-9]{10}$/.test(c.attestAppIdPrefix ?? '') || !c.bundleId)) throw new Error('Set APP_ATTEST_APP_ID_PREFIX and APNS_BUNDLE_ID');

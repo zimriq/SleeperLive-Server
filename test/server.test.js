@@ -373,3 +373,37 @@ test('public health preserves the iOS contract without exposing or consulting in
     assert.equal(reads,0,'public liveness must not read private registrations');
   }
 });
+
+
+test('ingress configuration keeps safe defaults and rejects invalid limits',()=>{
+  const base={INVITE_ENROLLMENT_ENABLED:'false'};
+  const defaults=config(base);
+  assert.equal(defaults.ingressPerIP,400);
+  assert.equal(defaults.ingressGlobal,1200);
+  const custom=config({...base,API_REQUESTS_PER_IP_PER_MINUTE:'800',API_REQUESTS_PER_MINUTE:'2400'});
+  assert.equal(custom.ingressPerIP,800);assert.equal(custom.ingressGlobal,2400);
+  for(const name of ['API_REQUESTS_PER_IP_PER_MINUTE','API_REQUESTS_PER_MINUTE']){
+    for(const value of ['','0','-1','1.5','NaN','Infinity','10001']){
+      assert.throws(()=>config({...base,[name]:value}),undefined,`${name}=${value}`);
+    }
+  }
+  assert.throws(()=>config({...base,API_REQUESTS_PER_IP_PER_MINUTE:'500',API_REQUESTS_PER_MINUTE:'400'}));
+});
+
+test('configured ingress budgets enforce separate IP and total limits before reads',async t=>{
+  let time=T*1000;
+  const f=await fixture(t,{cfg:{ingressPerIP:2,ingressGlobal:4},now:()=>time});
+  let reads=0;
+  const read=f.store.read;
+  f.store.read=()=>{reads++;return read();};
+  const request=ip=>fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-for':ip}});
+  // Fixture enrollment consumed one global admission on the loopback address.
+  assert.equal((await request('192.0.2.1')).status,401);
+  assert.equal((await request('192.0.2.1')).status,401);
+  assert.equal((await request('192.0.2.1')).status,429);
+  assert.equal((await request('192.0.2.2')).status,401);
+  assert.equal((await request('192.0.2.3')).status,429);
+  assert.equal(reads,0);
+  time+=60000;
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200);
+});

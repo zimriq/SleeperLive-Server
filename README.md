@@ -117,7 +117,13 @@ copies separately and test restores with the server stopped.
 ## Request protection
 
 Before parsing API bodies or reading credentials from SQLite, `/v1` requests pass
-an in-memory fixed-window limit: 400 per IP and 1,200 total admissions per minute.
+an in-memory fixed-window limit, defaulting to 400 per IP and 1,200 total admissions
+per minute. Configure these with `API_REQUESTS_PER_IP_PER_MINUTE` and
+`API_REQUESTS_PER_MINUTE`. Both must be integers from 1 to 10,000, and the IP limit
+must not exceed the total; invalid settings stop startup. Changes take effect on
+restart. The total also bounds the number of stored IP counters. These are request
+budgets, not user caps. Raising them requires measuring server load; downstream
+enrollment, device, and upstream-fetch limits still apply independently.
 Rejected requests return HTTP 429 with `Retry-After` in seconds and `no-store`.
 The ingress counters are separate from enrollment and authenticated-device limits;
 the IP map is bounded by the total admission budget and resets each minute.

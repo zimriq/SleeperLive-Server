@@ -15,14 +15,14 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     if(++hits.get(key).n>max)throw fail(429,'rate_limited');
   }
   // Separate, bounded ingress budget: no database access or body parsing here.
-  // One shared window bounds the map to at most 1,200 IPs, without a per-request scan.
+  // One shared window bounds the map by the configured global admission limit, without a per-request scan.
   let ingressUntil=0, ingressTotal=0;
   const ingressIPs=new Map();
   app.use('/v1',(req,res,next)=>{
     const t=now();
     if(t>=ingressUntil){ingressUntil=t+60000;ingressTotal=0;ingressIPs.clear();}
     const count=ingressIPs.get(req.ip)??0;
-    if(ingressTotal>=1200 || count>=400){
+    if(ingressTotal>=(cfg.ingressGlobal??1200) || count>=(cfg.ingressPerIP??400)){
       return res.status(429).set('Retry-After',String(Math.max(1,Math.ceil((ingressUntil-t)/1000))))
         .set('Cache-Control','no-store').json({error:'rate_limited'});
     }
