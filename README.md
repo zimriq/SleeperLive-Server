@@ -152,7 +152,17 @@ owned active Live Activities for end pushes. Pushes are attempted after restart;
 Apple acceptance or immediate disappearance from the phone is not guaranteed.
 Other devices are unaffected. Repeated revocation is safe. This revokes one device
 credential, not a Sleeper username or a person's ability to enroll a different key.
-No public administration endpoint or automatic record deletion is introduced.
+No public administration endpoint or automatic device-record deletion is introduced.
+
+Every successful storage transaction removes the bearer credential hash and stored
+attestation public key from revoked records. This includes older revoked records
+on the next normal write (such as poller housekeeping). Active device records are
+unchanged. Revoked device IDs, attestation key IDs, and revocation flags remain to
+prevent key reuse; pending activity end tokens remain until their lifecycle finishes.
+This is logical data minimization, not secure erasure: older SQLite pages, WAL files,
+and backups can retain previous values. No automatic deletion of replay-blocking
+records or age-based expiration of active devices is performed. Long-term retention
+and growth of those records still need an explicit policy.
 
 ## Source layout
 

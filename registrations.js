@@ -27,6 +27,11 @@ export function openStore(path) {
         const state = JSON.parse(read.get().value);
         const result = fn(state);
         if (result instanceof Promise) throw new Error('Transactions must be synchronous');
+        // Keep replay-blocking IDs, but discard authentication material no longer
+        // needed for revoked devices. Also covers old records on the next commit.
+        for(const device of Object.values(state.devices)){
+          if(device.revoked){delete device.hash;delete device.attestPublicKey;}
+        }
         const nextCredentials=index(state);
         write.run(JSON.stringify(state)); db.exec('COMMIT');
         credentials=nextCredentials;return result;
