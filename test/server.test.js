@@ -256,25 +256,26 @@ test('ingress limits rotating invalid tokens before database reads and resets at
     const token=i.toString(16).padStart(32,'0')+'.'+'a'.repeat(64);
     assert.equal((await f.call('/v1/devices/me','GET',undefined,token)).status,401);
   }
-  assert.equal(reads,399);
-  const blocked=await f.call('/v1/devices/me','GET',undefined,f.token);
+  assert.equal(reads,0);
+  const blocked=await f.call('/v1/devices/me');
   assert.equal(blocked.status,429);
   assert.equal(blocked.headers.get('retry-after'),'60');
   assert.equal(blocked.headers.get('cache-control'),'no-store');
   assert.deepEqual(await blocked.json(),{error:'rate_limited'});
-  assert.equal(reads,399,'blocked valid or invalid credentials must not read SQLite');
+  assert.equal(reads,0,'invalid credentials must not read SQLite');
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200,'valid device retains a separate allowance');
   // Even malformed JSON is rejected by ingress before the parser or enrollment.
   for(const path of ['/v1/devices','/v1/enrollment/challenge']){
     const response=await fetch(f.root+path,{method:'POST',headers:{'content-type':'application/json'},body:'{'});
     assert.equal(response.status,429);
   }
   assert.equal((await f.call('/health')).status,200);
-  assert.equal(reads,399);
+  assert.equal(reads,0);
   time+=59000;
   assert.equal((await f.call('/v1/devices/me')).headers.get('retry-after'),'1');
   time+=1000;
   assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200);
-  assert.equal(reads,400);
+  assert.equal(reads,0);
 });
 
 test('global ingress budget bounds rotating IPs and recovers without database work',async t=>{
@@ -330,7 +331,7 @@ test('disabled invite enrollment does not access storage or invalidate existing 
   const id='b'.repeat(32),secret='c'.repeat(64);
   store.change(s=>s.devices[id]={hash:createHash('sha256').update(secret).digest('hex'),createdAt:T});
   let reads=0,writes=0;
-  const observed={read:()=>{reads++;return store.read();},change:fn=>{writes++;return store.change(fn);}};
+  const observed={credentialHash:store.credentialHash,read:()=>{reads++;return store.read();},change:fn=>{writes++;return store.change(fn);}};
   const app=createApp({cfg:{...cfg,inviteEnabled:false,attestEnabled:true},store:observed,sleeper,now:()=>T*1000});
   const server=app.listen(0,'127.0.0.1');
   await new Promise(r=>server.on('listening',r));
@@ -479,4 +480,45 @@ test('forged forwarded headers cannot rotate direct or Railway-public rate ident
     if(clientIPMode==='direct')headers['x-real-ip']='192.0.2.2';
     assert.equal((await fetch(f.root+'/v1/devices/me',{headers})).status,429);
   }
+});
+
+test('anonymous floods cannot consume authenticated matchup or activity budgets',async t=>{
+  const f=await fixture(t,{cfg:{ingressPerIP:5,ingressGlobal:5,attestEnabled:true}});
+  const id=f.token.split('.')[0];
+  let reads=0;
+  const read=f.store.read;
+  f.store.read=()=>{reads++;return read();};
+  // Enrollment already consumed one anonymous admission. Guessing a known ID
+  // with the wrong secret must remain anonymous and never read SQLite.
+  for(let i=0;i<4;i++){
+    const response=await f.call('/v1/devices/me','GET',undefined,`${id}.${i.toString(16).padStart(64,'0')}`);
+    assert.equal(response.status,401);
+  }
+  for(let i=0;i<20;i++)assert.equal((await f.call('/v1/devices/me')).status,429);
+  // Even attaching a valid credential to enrollment cannot spend the auth budget.
+  assert.equal((await f.call('/v1/enrollment/challenge','POST',{},f.token)).status,429);
+  assert.equal((await f.call('/v1/devices','POST',{inviteCode:cfg.invite},f.token)).status,429);
+  assert.equal(reads,0);
+  assert.equal((await f.call('/v1/matchup?leagueId=123456789&week=6&rosterId=1','GET',undefined,f.token)).status,200);
+  assert.equal((await f.call('/v1/activities/flood-test','PUT',registration,f.token)).status,201);
+  for(let i=0;i<3;i++)assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200);
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,429,'authenticated processing remains bounded too');
+});
+
+test('credential index reflects only committed state and rebuilds after restart',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'credential-index-')),file=join(dir,'state.db');
+  let store=openStore(file);
+  try{
+    store.change(s=>s.devices.example={hash:'original'});
+    assert.equal(store.credentialHash('example'),'original');
+    assert.throws(()=>store.change(s=>{s.devices.example.hash='uncommitted';throw Error('abort');}));
+    assert.equal(store.credentialHash('example'),'original');
+    store.close();store=openStore(file);
+    assert.equal(store.credentialHash('example'),'original');
+    store.change(s=>s.devices.example.revoked=true);
+    assert.equal(store.credentialHash('example'),undefined);
+    store.close();store=openStore(file);
+    assert.equal(store.credentialHash('example'),undefined);
+    assert.equal(store.credentialHash('unknown'),undefined);
+  }finally{store.close();rmSync(dir,{recursive:true,force:true});}
 });

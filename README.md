@@ -136,18 +136,29 @@ copies separately and test restores with the server stopped.
 
 ## Request protection
 
-Before parsing API bodies or reading credentials from SQLite, `/v1` requests pass
-an in-memory fixed-window limit, defaulting to 400 per IP and 1,200 total admissions
-per minute. Configure these with `API_REQUESTS_PER_IP_PER_MINUTE` and
-`API_REQUESTS_PER_MINUTE`. Both must be integers from 1 to 10,000, and the IP limit
-must not exceed the total; invalid settings stop startup. Changes take effect on
-restart. The total also bounds the number of stored IP counters. These are request
-budgets, not user caps. Raising them requires measuring server load; downstream
-enrollment, device, and upstream-fetch limits still apply independently.
-Rejected requests return HTTP 429 with `Retry-After` in seconds and `no-store`.
-The ingress counters are separate from enrollment and authenticated-device limits;
-the IP map is bounded by the total admission budget and resets each minute.
-`/health` is outside this gate. Existing limits still apply after admission.
+Before parsing API bodies, `/v1` requests are classified using a fixed-size bearer
+credential check against an in-memory index of committed active devices. Unknown
+IDs and wrong secrets never trigger a database read or create cache entries.
+Enrollment routes always use the anonymous budget, even with a valid bearer token.
+The credential index contains only IDs and hashes, is limited to 1,000 active
+devices, updates after successful commits, and rebuilds at startup. Revocation
+removes a credential immediately after commit. This relies on a single process
+owning database writes; external writers are not supported.
+
+Anonymous and authenticated requests have **independent** fixed-window allowances.
+Each defaults to 400 requests per IP and 1,200 total per minute, configured through
+`API_REQUESTS_PER_IP_PER_MINUTE` and `API_REQUESTS_PER_MINUTE`. Thus the combined
+admission ceiling defaults to 2,400 per minute, with 1,200 reserved for authenticated
+traffic. Rejected anonymous requests cannot spend that reservation. Credential
+classification still runs for incoming requests, so this is not network-level flood
+protection. One compromised valid device remains subject to its 30/minute budget.
+
+Both settings must be integers from 1 to 10,000, with IP <= total; invalid settings
+stop startup. Each IP map is bounded by its own admission budget and resets each
+minute. Changes take effect on restart. These are request budgets, not user caps.
+Downstream enrollment, device, and upstream-fetch limits apply independently.
+429 responses include `Retry-After`; the ingress rejection also uses `no-store`.
+`/health` remains outside these budgets.
 
 `GET /health` is a public liveness check returning only `ok` and the APNs `mode`
 (`live` or `dry-run`), with `Cache-Control: no-store`. The iOS app uses these fields.

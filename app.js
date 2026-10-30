@@ -10,21 +10,32 @@ const fail=(status,error)=>Object.assign(new Error(error),{status});
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
   app.disable('x-powered-by');app.set('trust proxy',false);
-  // Separate, bounded ingress budget: no database access or body parsing here.
-  // One shared window bounds the map by the configured global admission limit, without a per-request scan.
-  let ingressUntil=0, ingressTotal=0;
-  const ingressIPs=new Map();
+  // Verify fixed-size bearer credentials using the committed, bounded memory index.
+  // Unknown credentials never allocate cache entries or trigger database reads.
+  let ingressUntil=0;
+  const budgets={anonymous:{total:0,ips:new Map()},authenticated:{total:0,ips:new Map()}};
   app.use('/v1',(req,res,next)=>{
     req.clientIP=clientIP(req,cfg.clientIPMode);
+    const enrollment=/^\/enrollment(?:\/|$)/i.test(req.path)||
+      (req.method==='POST'&&/^\/devices\/?$/i.test(req.path));
+    const match=!enrollment&&/^Bearer ([a-f0-9]{32})\.([a-f0-9]{64})$/.exec(req.get('authorization')??'');
+    const credential=match&&store.credentialHash(match[1]);
+    if(credential&&equals(hash(match[2]),credential)){
+      req.deviceId=match[1];req.credentialHash=credential;
+    }
     const t=now();
-    if(t>=ingressUntil){ingressUntil=t+60000;ingressTotal=0;ingressIPs.clear();}
-    const count=ingressIPs.get(req.clientIP)??0;
-    if(ingressTotal>=(cfg.ingressGlobal??1200) || count>=(cfg.ingressPerIP??400)){
+    if(t>=ingressUntil){
+      ingressUntil=t+60000;
+      for(const budget of Object.values(budgets)){budget.total=0;budget.ips.clear();}
+    }
+    const budget=req.deviceId?budgets.authenticated:budgets.anonymous;
+    const count=budget.ips.get(req.clientIP)??0;
+    if(budget.total>=(cfg.ingressGlobal??1200)||count>=(cfg.ingressPerIP??400)){
       return res.status(429).set('Retry-After',String(Math.max(1,Math.ceil((ingressUntil-t)/1000))))
         .set('Cache-Control','no-store').json({error:'rate_limited'});
     }
-    ingressTotal++;
-    ingressIPs.set(req.clientIP,count+1);
+    budget.total++;budget.ips.set(req.clientIP,count+1);
+    if(req.deviceId)limit(`device:${req.deviceId}`,30);
     next();
   });
   app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));
@@ -44,10 +55,10 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     res.status(201).json({deviceId:id,deviceToken:`${id}.${secret}`});
   });
   app.use('/v1',(req,res,next)=>{
-    const match=/^Bearer ([a-f0-9]{32})\.([a-f0-9]{64})$/.exec(req.get('authorization')??'');
-    const device=match && store.read().devices[match[1]];
-    if(!device || device.revoked || !equals(hash(match[2]),device.hash))return res.status(401).json({error:'unauthorized'});
-    req.deviceId=match[1];try{limit(`device:${req.deviceId}`,30);next();}catch(e){next(e);}
+    // Recheck after body parsing: a concurrent request may have revoked the device.
+    if(!req.deviceId||store.credentialHash(req.deviceId)!==req.credentialHash)
+      return res.status(401).json({error:'unauthorized'});
+    next();
   });
   function identity(body){
     const {leagueId}=body,week=Number(body.week),rosterId=Number(body.rosterId);
