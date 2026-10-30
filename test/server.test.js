@@ -315,6 +315,30 @@ test('twelve devices sharing an IP retain their individual authenticated budgets
 });
 
 
+test('over-limit devices cannot spend shared authenticated IP or global allowances',async t=>{
+  for(const rotatingIP of [false,true])await t.test(rotatingIP?'rotating IPs':'shared IP',async t=>{
+    let time=T*1000;
+    const f=await fixture(t,{cfg:{clientIPMode:'railway-public',ingressPerIP:40,ingressGlobal:40},now:()=>time});
+    const other=await (await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+    for(let i=0;i<30;i++)assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,200);
+    for(let i=0;i<50;i++){
+      const res=await fetch(f.root+'/v1/devices/me',{headers:{
+        authorization:`Bearer ${f.token}`,'x-real-ip':rotatingIP?`192.0.2.${i+1}`:'127.0.0.1',
+      }});
+      assert.equal(res.status,429);
+      assert.ok(Number(res.headers.get('retry-after'))>0);
+      await res.arrayBuffer();
+    }
+    for(let i=0;i<10;i++)assert.equal((await f.call('/v1/devices/me','GET',undefined,other.deviceToken)).status,200,
+      'another device can use the remaining shared allowance despite rejected traffic');
+    assert.equal((await f.call('/v1/devices/me','GET',undefined,other.deviceToken)).status,429,
+      'accepted traffic still reaches the shared ceiling');
+    time+=60001;
+    for(const token of [f.token,other.deviceToken])
+      assert.equal((await f.call('/v1/devices/me','GET',undefined,token)).status,200,'budgets recover after expiry');
+  });
+});
+
 test('invite enrollment policy defaults closed with App Attest and validates explicit overrides',()=>{
   const attested={APP_ATTEST_ENABLED:'true',APP_ATTEST_APP_ID_PREFIX:'ABCDEFGHIJ',APNS_BUNDLE_ID:'com.example.test'};
   assert.equal(config(attested).inviteEnabled,false,'attested enrollment needs no invite secret');

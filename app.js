@@ -35,8 +35,9 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
       return res.status(429).set('Retry-After',String(Math.max(1,Math.ceil((ingressUntil-t)/1000))))
         .set('Cache-Control','no-store').json({error:'rate_limited'});
     }
-    budget.total++;budget.ips.set(req.clientIP,count+1);
+    // Rejected devices must not spend other users' shared admission allowance.
     if(req.deviceId)limit(`device:${req.deviceId}`,30);
+    budget.total++;budget.ips.set(req.clientIP,count+1);
     next();
   });
   app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));

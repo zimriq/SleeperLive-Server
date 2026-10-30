@@ -201,6 +201,8 @@ Both settings must be integers from 1 to 10,000, with IP <= total; invalid setti
 stop startup. Each IP map is bounded by its own admission budget and resets each
 minute. Changes take effect on restart. These are request budgets, not user caps.
 Downstream enrollment, device, and upstream-fetch limits apply independently.
+Requests rejected by the per-device limit do not consume the shared authenticated
+IP or global allowance. Accepted requests still count toward both shared ceilings.
 429 responses include `Retry-After`; the ingress rejection also uses `no-store`.
 `/health` remains outside these budgets.
 
