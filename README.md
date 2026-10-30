@@ -156,14 +156,19 @@ A successful response means the HTTP service is responding, not that the databas
 Sleeper feeds, polling loop, or Apple push delivery are healthy. It is not a
 readiness check and does not trigger database reads or upstream requests.
 
-The downstream enrollment/device/upstream counters share a separate 5,000-entry
-store. Cleanup removes expired entries in oldest-first order and stops at the first
-unexpired entry, instead of scanning the full store on every request. Each counter
-expires 60 seconds after creation; hits do not extend its window. At capacity, new
-keys are rejected while existing counters retain their budgets. A backward clock
-adjustment cannot reset counters early, though it can lengthen the wait for expiry.
-The shared-capacity policy is unchanged; this optimization does not eliminate
-competition between clients for that capacity.
+The downstream counters reserve separate capacity: 1,000 authenticated-device
+counters, 3,998 enrollment IP counters (shared by private and App Attest enrollment),
+and two fixed global counters. Total capacity remains 5,000. Enrollment IP churn
+cannot consume the slots reserved for authenticated devices or global budgets.
+The device reservation matches the maximum supported `MAX_DEVICES` setting.
+These are counter capacities, not a change to configured registration caps.
+
+Cleanup removes expired entries in oldest-first order and stops at the first
+unexpired entry. Counters expire 60 seconds after creation; hits do not extend the
+window. At capacity, a category rejects new keys while existing counters retain
+their budgets. Backward clock adjustments cannot reset counters early, though they
+can lengthen the wait. Shared IP and global request limits still apply: reserving
+counter capacity does not guarantee availability during sustained abuse.
 
 These limits include legitimate requests and can temporarily affect users sharing
 an IP or the entire service during sustained abuse. They reset on process restart,
