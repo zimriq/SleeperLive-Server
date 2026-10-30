@@ -66,6 +66,18 @@ The next request after the cooldown can retry automatically; no background retry
 is scheduled. Actual scores remain available even when estimates are unavailable.
 The cooldown is in memory and resets if the process restarts.
 
+## Upstream response safeguards
+
+Sleeper and projection HTTP requests retain a 12-second timeout. JSON response
+bodies are limited to 8 MiB of streamed bytes, except the exact Sleeper all-player
+catalog endpoint, which allows 32 MiB. Limits apply to the decoded fetch body;
+Content-Length is not trusted. Oversized responses are cancelled before JSON
+parsing; HTTP error bodies are cancelled without parsing. Malformed or interrupted
+responses fail normally, allowing existing score-retention and estimate-cooldown
+behavior to apply. These are body-size limits, not total process-memory limits:
+JSON parsing and cached objects require additional memory. If a legitimate feed
+outgrows its limit, inspect its size and adjust deliberately.
+
 ## Reliability and limits
 
 - Poll interval is 60–90 seconds (75 default), measured after each run finishes.
