@@ -108,6 +108,7 @@ copies separately and test restores with the server stopped.
 - `server.js`: startup and shutdown; `config.js`: environment validation.
 - `app.js`: authenticated HTTP API, request limits, and activity registration.
 - `enrollment.js`: App Attest challenges and verification.
+- `rate-limit.js`: bounded fixed-window counters for the existing API limits.
 - `registrations.js`: transactional SQLite storage; `backup.js`: database backups.
 - `sleeper.js`: upstream data and caching; `projections.js`: optional estimates.
 - `poller.js`: polling, lifecycle, change detection, and retries.
@@ -135,6 +136,15 @@ It does not expose polling timestamps, raw errors, credentials, or database deta
 A successful response means the HTTP service is responding, not that the database,
 Sleeper feeds, polling loop, or Apple push delivery are healthy. It is not a
 readiness check and does not trigger database reads or upstream requests.
+
+The downstream enrollment/device/upstream counters share a separate 5,000-entry
+store. Cleanup removes expired entries in oldest-first order and stops at the first
+unexpired entry, instead of scanning the full store on every request. Each counter
+expires 60 seconds after creation; hits do not extend its window. At capacity, new
+keys are rejected while existing counters retain their budgets. A backward clock
+adjustment cannot reset counters early, though it can lengthen the wait for expiry.
+The shared-capacity policy is unchanged; this optimization does not eliminate
+competition between clients for that capacity.
 
 These limits include legitimate requests and can temporarily affect users sharing
 an IP or the entire service during sustained abuse. They reset on process restart,

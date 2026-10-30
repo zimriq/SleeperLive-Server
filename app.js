@@ -1,4 +1,5 @@
 import express from 'express';
+import { createRateLimiter } from './rate-limit.js';
 import { enrollmentRouter } from './enrollment.js';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { snapshot } from './sleeper.js';
@@ -6,14 +7,8 @@ const hash = text=>createHash('sha256').update(text).digest('hex');
 const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(b),'hex'));
 const fail=(status,error)=>Object.assign(new Error(error),{status});
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
-  const app=express(), seconds=()=>Math.floor(now()/1000), hits=new Map();
+  const app=express(), seconds=()=>Math.floor(now()/1000), limit=createRateLimiter(now);
   app.disable('x-powered-by');app.set('trust proxy',1);
-  function limit(key,max){
-    const t=now();
-    for(const [k,v] of hits)if(v.until<t)hits.delete(k);
-    if(!hits.has(key)){if(hits.size>=5000)throw fail(429,'rate_limited');hits.set(key,{n:0,until:t+60000});}
-    if(++hits.get(key).n>max)throw fail(429,'rate_limited');
-  }
   // Separate, bounded ingress budget: no database access or body parsing here.
   // One shared window bounds the map by the configured global admission limit, without a per-request scan.
   let ingressUntil=0, ingressTotal=0;
