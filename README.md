@@ -66,6 +66,17 @@ The next request after the cooldown can retry automatically; no background retry
 is scheduled. Actual scores remain available even when estimates are unavailable.
 The cooldown is in memory and resets if the process restarts.
 
+## Incoming HTTP safeguards
+
+The HTTP listener accepts at most 16 KiB of request headers, allows 15 seconds to
+receive headers and 30 seconds to receive the entire request, and checks stalled
+connections every second. Oversized headers receive 431; expired uploads receive
+408 and the connection closes. Deadline enforcement may lag by the check interval
+and event-loop scheduling. Idle keep-alive connections close after five seconds.
+These are request-receiving limits, not deadlines for computing a response after
+an upload completes. Existing 8 KiB JSON and 32 KiB attestation body limits remain.
+The socket tests exercise the actual production header and upload deadlines.
+
 ## Upstream response safeguards
 
 Sleeper and projection HTTP requests retain a 12-second timeout. JSON response
@@ -146,6 +157,7 @@ No public administration endpoint or automatic record deletion is introduced.
 ## Source layout
 
 - `server.js`: startup and shutdown; `config.js`: environment validation.
+- `http-server.js`: HTTP header, upload, and keep-alive boundaries.
 - `app.js`: authenticated HTTP API, request limits, and activity registration.
 - `enrollment.js`: App Attest challenges and verification.
 - `revoke-device.js`: shared revocation logic and offline operator command.
