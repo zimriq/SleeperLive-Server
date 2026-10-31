@@ -6,6 +6,8 @@ import { createEstimator } from './projections.js';
 import { createAPNs } from './apns.js';
 import { createPoller } from './poller.js';
 import { createApp } from './app.js';
+// Restrict newly created files to the service's operating-system user.
+process.umask(0o077);
 const cfg=config(),store=openStore(cfg.db),sleeper=createSleeper();
 const estimator=cfg.projections?createEstimator():undefined,transport=createAPNs(cfg);
 const poller=createPoller({store,sleeper,transport,estimator,pollMs:cfg.pollMs,pushConcurrency:cfg.pushConcurrency});
