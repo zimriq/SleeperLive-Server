@@ -6,19 +6,19 @@ users, and sends score changes and freshness heartbeats through APNs.
 
 ## Status
 
-Implemented: authenticated private testing, durable registrations, token rotation,
-75-second polling, score/name lookup, retry backoff, activity expiry, APNs payloads,
-and an optional experimental live estimate. No big-play alerts, avatars, or win probability.
+The iOS app and server have been exercised on real devices through TestFlight,
+including live-game score updates, according to tester reports. This is functional
+validation, not completion of the ongoing security review.
 
-Tested locally with Node 26.8.1; deployment image uses Node 24. The project requires
-Node 24+ for built-in SQLite. Express is the only installed dependency.
-Real Apple delivery and Railway deployment have NOT been tested. The iOS app still
-needs its widget extension, push capability, token registration, and matching models.
-The existing app is not automatically connected to this server.
+Requires Node.js 24+ for built-in SQLite. Dependencies are Express, cbor, and
+node-app-attest. The server supports automatic App Attest enrollment, configurable legacy private
+invite enrollment, durable registrations, token rotation, score-change pushes,
+retry backoff, activity expiry, and optional experimental estimates.
+No big-play alerts, avatars, or win probabilities are provided.
 
 ## Local setup
 
-1. Run `npm ci` (or keep the existing installed Express dependency).
+1. Run `npm ci`.
 2. Copy `.env.example` to `.env`. Do not overwrite an existing `.env`.
 3. Generate an invite secret with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
    and set it as `INVITE_CODE`. Never commit it or embed it in a public app binary.
@@ -33,23 +33,6 @@ For real pushes set `APNS_MODE=live`, `APNS_TEAM_ID`, `APNS_KEY_ID`, and the app
 `APNS_BUNDLE_ID`. Supply either `APNS_KEY_FILE` or `APNS_KEY_P8`. Never put the .p8
 key in Git. Registration must specify the environment corresponding to the signed
 app's push entitlement, not simply assume all debug builds use the same environment.
-
-## Hosting on Railway
-
-Use the included Dockerfile, one replica, and an always-running service. Attach a
-persistent volume at `/data` and set `DB_PATH=/data/server.sqlite`. Set environment
-variables in Railway, expose the HTTP port, and configure `/health` as the health
-check. Do not enable service sleeping for this polling worker.
-
-Budget goal: $5–10/month for roughly 12 users; not a quote. Track actual resource
-usage and configure billing alerts. No Redis or separate database service is needed.
-SQLite and the transactional document store deliberately target a small, single
-instance. Don't scale to multiple replicas using separate local databases.
-
-`npm run backup` makes a consistent online SQLite backup (defaults to data/backups).
-This is manual, not an automatic schedule. Configure Railway volume backups and
-keep a copy outside the volume for recovery from volume loss. Restore while the
-service is stopped; test recovery before public release.
 
 ## Estimates
 
@@ -70,8 +53,41 @@ This is a rough time-based estimate, not a calibrated prediction. Injuries, game
 script, possession, delayed stats, current-team metadata for old weeks, sparse feed
 stats and defensive scoring buckets limit accuracy. Projection feed revisions may
 also change the baseline. Do not present it as injury-aware or promise Yahoo parity.
-Compare it with real games before enabling for users. Live-game behavior has not
-been verified. Feed failure hides projections while actual scores keep updating.
+Real-game testing has been reported successful, but does not establish prediction
+accuracy. Feed failure hides projections while actual scores keep updating.
+
+Projection feed failures or invalid responses trigger a shared 60-second retry
+cooldown, starting when all requests in the failed batch settle. During that time,
+requests needing new feed data return unavailable estimates without fetching again;
+a still-fresh cached snapshot can continue serving its matching season/week.
+Expired estimates are not reused. Only one feed batch runs at a time, and the
+cooldown applies across leagues and weeks to prevent repeated failed fetches.
+The next request after the cooldown can retry automatically; no background retry
+is scheduled. Actual scores remain available even when estimates are unavailable.
+The cooldown is in memory and resets if the process restarts.
+
+## Incoming HTTP safeguards
+
+The HTTP listener accepts at most 16 KiB of request headers, allows 15 seconds to
+receive headers and 30 seconds to receive the entire request, and checks stalled
+connections every second. Oversized headers receive 431; expired uploads receive
+408 and the connection closes. Deadline enforcement may lag by the check interval
+and event-loop scheduling. Idle keep-alive connections close after five seconds.
+These are request-receiving limits, not deadlines for computing a response after
+an upload completes. Existing 8 KiB JSON and 32 KiB attestation body limits remain.
+The socket tests exercise the actual production header and upload deadlines.
+
+## Upstream response safeguards
+
+Sleeper and projection HTTP requests retain a 12-second timeout. JSON response
+bodies are limited to 8 MiB of streamed bytes, except the exact Sleeper all-player
+catalog endpoint, which allows 32 MiB. Limits apply to the decoded fetch body;
+Content-Length is not trusted. Oversized responses are cancelled before JSON
+parsing; HTTP error bodies are cancelled without parsing. Malformed or interrupted
+responses fail normally, allowing existing score-retention and estimate-cooldown
+behavior to apply. These are body-size limits, not total process-memory limits:
+JSON parsing and cached objects require additional memory. If a legitimate feed
+outgrows its limit, inspect its size and adjust deliberately.
 
 ## Reliability and limits
 
@@ -94,12 +110,344 @@ been verified. Feed failure hides projections while actual scores keep updating.
   the server prevents subsequent work for ended activities.
 - At-least-once retry: a crash between Apple accepting a push and the database
   committing can cause a repeated update. Exactly-once delivery is not claimed.
-- Polling is single-flight; identity checks/caps are transactional. Late responses
+- Polling is single-flight; identity checks/caps are transactional.
+  Each tick processes activities with up to `APNS_MAX_CONCURRENT_SENDS` workers
+  (default 4, allowed 1–16). Workers include feed lookup and snapshot preparation,
+  so simultaneous APNs sends never exceed that bound. A slow send occupies one
+  slot; it does not stop the other slots. League/week data is fetched once per tick.
+  Queued activities are rechecked before sending; shutdown waits for active workers.
+  This changes processing concurrency, not polling frequency or Apple's delivery
+  budgets. Raising the limit needs load testing and can increase upstream concurrency. Late responses
   from a superseded token cannot mark its replacement invalid.
-- Private invite onboarding only. Before public App Store launch, implement a
-  public enrollment/abuse-control flow (e.g. App Attest), plus privacy/support pages.
-  Sleeper username is not authentication.
+- Automatic App Attest enrollment is implemented; legacy invite enrollment is disabled by default when App Attest
+  is enabled. App Attest verifies app/device integrity, not ownership of a
+  Sleeper username. Security hardening is still in progress.
 
-See CONTRACT.md for iOS integration. The old unauthenticated `/register` and
-`/unregister` routes were replaced intentionally. No migration is needed for the
-original in-memory Map; it never survived a restart.
+## Storage and backups
+
+SQLite stores device credential hashes and activity registrations. This design
+supports a single server instance; separate instances with separate databases do
+not share state. Keep the database and its backups private.
+
+`npm run backup` creates a consistent online SQLite backup, defaulting to
+`data/backups`. It is a manual command, not an automatic schedule. Keep recovery
+copies separately and test restores with the server stopped.
+
+## Device revocation
+
+Users can revoke their current credential through authenticated
+`DELETE /v1/devices/me`. Operators can revoke a device without its bearer token
+using `npm run revoke-device -- --server-stopped <32-character-device-id>`.
+
+The operator command is **offline only**: stop the server process first, back up
+its database, explicitly set `DB_PATH` to that existing database, run the command,
+and restart the server. `--server-stopped` is an operator acknowledgement, not a
+process detector. Never run it against a database used by a live server: the
+running credential index would remain stale. A restarted server rebuilds the
+index and rejects the revoked credential. Do not copy database contents or tokens
+into chat or logs; the command prints only a result and activity count.
+
+Revocation retains the device/attestation-key record to block key reuse, and queues
+owned active Live Activities for end pushes. Pushes are attempted after restart;
+Apple acceptance or immediate disappearance from the phone is not guaranteed.
+Other devices are unaffected. Repeated revocation is safe. This revokes one device
+credential, not a Sleeper username or a person's ability to enroll a different key.
+No public administration endpoint or automatic device-record deletion is introduced.
+
+Every successful storage transaction removes the bearer credential hash and stored
+attestation public key from revoked records. This includes older revoked records
+on the next normal write (such as poller housekeeping). Active device records are
+unchanged. Revoked device IDs, attestation key IDs, and revocation flags remain to
+prevent key reuse; pending activity end tokens remain until their lifecycle finishes.
+This is logical data minimization, not secure erasure: older SQLite pages, WAL files,
+and backups can retain previous values. No automatic deletion of replay-blocking
+records or age-based expiration of active devices is performed. Long-term retention
+and growth of those records still need an explicit policy.
+
+## Source layout
+
+- `server.js`: startup and shutdown; `config.js`: environment validation.
+- `http-server.js`: HTTP header, upload, and keep-alive boundaries.
+- `app.js`: authenticated HTTP API, request limits, and activity registration.
+- `enrollment.js`: App Attest challenges and verification.
+- `revoke-device.js`: shared revocation logic and offline operator command.
+- `rate-limit.js`: bounded fixed-window counters for the existing API limits.
+- `registrations.js`: transactional SQLite storage; `backup.js`: database backups.
+- `sleeper.js`: upstream data and caching; `projections.js`: optional estimates.
+- `poller.js`: polling, lifecycle, change detection, and retries.
+- `apns.js`: signed Apple push requests.
+- `test/`: automated regression tests; `scripts/benchmark.mjs`: synthetic load test.
+
+## Request protection
+
+Before parsing API bodies, `/v1` requests are classified using a fixed-size bearer
+credential check against an in-memory index of committed active devices. Unknown
+IDs and wrong secrets never trigger a database read or create cache entries.
+Enrollment routes always use the anonymous budget, even with a valid bearer token.
+The credential index contains only IDs and hashes, is limited to 1,000 active
+devices, updates after successful commits, and rebuilds at startup. Revocation
+removes a credential immediately after commit. This relies on a single process
+owning database writes; external writers are not supported.
+
+Anonymous and authenticated requests have **independent** fixed-window allowances.
+Each defaults to 400 requests per IP and 1,200 total per minute, configured through
+`API_REQUESTS_PER_IP_PER_MINUTE` and `API_REQUESTS_PER_MINUTE`. Thus the combined
+admission ceiling defaults to 2,400 per minute, with 1,200 reserved for authenticated
+traffic. Rejected anonymous requests cannot spend that reservation. Credential
+classification still runs for incoming requests, so this is not network-level flood
+protection. One compromised valid device remains subject to its 30/minute budget.
+
+Both settings must be integers from 1 to 10,000, with IP <= total; invalid settings
+stop startup. Each IP map is bounded by its own admission budget and resets each
+minute. Changes take effect on restart. These are request budgets, not user caps.
+Downstream enrollment, device, and upstream-fetch limits apply independently.
+Requests rejected by the per-device limit do not consume the shared authenticated
+IP or global allowance. Accepted requests still count toward both shared ceilings.
+429 responses include `Retry-After`; the ingress rejection also uses `no-store`.
+`/health` remains outside these budgets.
+
+`GET /health` is a public liveness check returning only `ok` and the APNs `mode`
+(`live` or `dry-run`), with `Cache-Control: no-store`. The iOS app uses these fields.
+It does not expose polling timestamps, raw errors, credentials, or database details.
+A successful response means the HTTP service is responding, not that the database,
+Sleeper feeds, polling loop, or Apple push delivery are healthy. It is not a
+readiness check and does not trigger database reads or upstream requests.
+
+The downstream counters reserve separate capacity: 1,000 authenticated-device
+counters, 3,998 enrollment IP counters (shared by private and App Attest enrollment),
+and two fixed global counters. Total capacity remains 5,000. Enrollment IP churn
+cannot consume the slots reserved for authenticated devices or global budgets.
+The device reservation matches the maximum supported `MAX_DEVICES` setting.
+These are counter capacities, not a change to configured registration caps.
+
+Cleanup removes expired entries in oldest-first order and stops at the first
+unexpired entry. Counters expire 60 seconds after creation; hits do not extend the
+window. At capacity, a category rejects new keys while existing counters retain
+their budgets. Backward clock adjustments cannot reset counters early, though they
+can lengthen the wait. Shared IP and global request limits still apply: reserving
+counter capacity does not guarantee availability during sustained abuse.
+
+These limits include legitimate requests and can temporarily affect users sharing
+an IP or the entire service during sustained abuse. They reset on process restart,
+are per instance, and are not a distributed denial-of-service defense. `CLIENT_IP_MODE=direct` (default) uses the connection peer and ignores forwarded
+headers. `railway-public` uses exactly one valid `X-Real-IP` supplied by Railway's
+HTTP edge; missing, duplicate, or malformed values fail with 400. IPv6 spelling
+variants and IPv4-mapped IPv6 addresses are normalized. Express proxy trust is off.
+Railway mode requires the listener to be reached only through the public HTTP edge
+or by trusted operators. It does not authenticate the edge: private-network callers
+and TCP/direct access can forge the header and must not be exposed to untrusted
+callers. Hostnames and other caller-supplied headers cannot establish that boundary.
+Do not enable this mode until the service's ingress paths have been checked. Local
+tests simulate sanitized headers; live Railway spoofing verification remains open.
+Sources: [Railway specs](https://docs.railway.com/networking/public-networking/specs-and-limits)
+and [staff clarification](https://station.railway.com/questions/need-authoritative-client-ip-proxy-tru-090eac86). Rotating IPs (including IPv6 addresses) share the global
+budget but are not grouped by subnet.
+
+## HTTP API and iOS integration
+
+Use HTTPS for remote connections. JSON uses camelCase. All dates are Int Unix seconds.
+Store device credentials in Keychain; never put the APNs signing key in the app.
+The app creates an ActivityKit Live Activity with pushType .token; no push-to-start.
+
+### Legacy private enrollment
+
+`INVITE_ENROLLMENT_ENABLED` explicitly enables or disables new invitation
+registrations. If unset, it defaults to false when `APP_ATTEST_ENABLED=true`, and
+true otherwise for compatibility with private local testing. Disabled enrollment
+returns 404 even if `INVITE_CODE` is present and correct. A secret of at least 24
+characters is required only when invitation enrollment is enabled. Responses from
+this route use `Cache-Control: no-store`, including successful credential creation.
+Existing device tokens remain valid until revoked; disabling invitations does not
+interrupt their activity registration or updates. An explicit true override should
+be reserved for deliberate private testing, since it bypasses App Attest enrollment.
+
+POST /v1/devices
+Body: {"inviteCode":"the invite entered by the tester"}
+Response 201: {"deviceId":"...", "deviceToken":"..."}
+
+All following endpoints require Authorization: Bearer <deviceToken>.
+A 401 means reenrollment is needed. A 429 is rate-limited; honor Retry-After.
+Invite codes are for private tests. Automatic App Attest enrollment is described below.
+
+### Initial and refreshed matchup
+
+GET /v1/matchup?leagueId=123456789&week=6&rosterId=4
+
+Response:
+```json
+{
+  "attributes": {
+    "leagueName": "My League",
+    "yourName": "My Team",
+    "opponentName": "Other Team",
+    "week": 6
+  },
+  "state": {
+    "yourScore": 42.5,
+    "opponentScore": 51.25,
+    "yourProjected": null,
+    "opponentProjected": null,
+    "yourProjectionKind": "unavailable",
+    "opponentProjectionKind": "unavailable",
+    "updatedAt": 1791948000
+  }
+}
+```
+
+Swift attributes contain leagueName/yourName/opponentName (String), week (Int).
+ContentState contains scores (Double), projections (Double?), projection kinds
+(String or a matching Codable enum), and updatedAt (Int). Convert to Date with
+Date(timeIntervalSince1970: TimeInterval(updatedAt)). No custom Date decoding.
+Kinds: estimate, final, unavailable. Show null projections as "Proj. —"; label available estimates "Proj.". Explain in the app that estimates are experimental, not official Sleeper live projections.
+
+Use this same server state for the app and initial Activity content. For initial
+content also set staleDate to updatedAt + 360. The app can retain its existing
+Sleeper account/league/roster discovery; use this endpoint for the authoritative
+matchup display once connected. A missing opponent/upstream failure currently
+returns 503 matchup_unavailable; don't start an activity with no valid snapshot.
+
+### Register and rotate
+
+PUT /v1/activities/<Activity.id>
+```json
+{
+  "leagueId": "123456789",
+  "week": 6,
+  "rosterId": 4,
+  "pushToken": "hex encoded activity push token",
+  "apnsEnvironment": "development",
+  "startedAt": 1791948000
+}
+```
+
+startedAt is when the app actually requested the activity, not when token registration
+finally succeeds. Persist it alongside the activity ID. Retry transient registration
+failures; subscribe to pushTokenUpdates and PUT on every token change. Sequential
+registration per activity avoids sending token changes in the wrong order. Identity
+and startedAt cannot change on retries. Response 201 (new) or 200 (existing) includes
+activityId and expiresAt. 409 means ended or mismatched identity; stop retrying that
+request unchanged. Token rotation never extends lifetime.
+
+Environment must match the signed app's aps-environment entitlement: development
+uses sandbox; distribution normally production. Build configuration alone is not
+proof. The first push arrives on the next server polling cycle, not instantly.
+
+### Read or end
+
+GET /v1/activities/<id> returns status, attributes, state, expiresAt, lastAcceptedAt.
+State is the initial snapshot or latest successful APNs submission, not proof of
+phone delivery. To get freshly fetched scores, use GET /v1/matchup.
+
+End locally with ActivityKit, then DELETE /v1/activities/<id> (204, idempotent).
+Retry deletion if offline; server expiry bounds abandoned registrations.
+DELETE /v1/devices/me revokes this device and requests end pushes for its activities.
+
+### Ordering and freshness
+
+updatedAt describes score-data freshness. When merging server snapshots in the app,
+ignore older updatedAt values within the SAME league/week/roster selection. Cancel or
+ignore requests from an old selection. Equal timestamps are allowed and may contain
+new projection data. No artificial per-activity revision is mixed with preview data.
+APNs ordering uses aps.timestamp (send time reserved durably, increasing per activity).
+The app's optional local Activity.update calls must use compatible timestamps;
+prefer server pushes for active activities rather than racing local/push updates.
+
+Show ActivityViewContext.isStale in the widget. Starting and ending must handle
+Live Activities disabled, missing tokens, user dismissal, registration failure,
+and the eight-hour lifecycle. Polling does not mean guaranteed 75-second delivery.
+
+
+## Automatic enrollment
+
+### Configuration
+
+- `APP_ATTEST_ENABLED=false` by default. Disabled endpoints return 404.
+- `APP_ATTEST_APP_ID_PREFIX`: verify the App ID Prefix in Apple Developer Identifiers.
+  Do not assume it is the Team ID. Combined with `APNS_BUNDLE_ID` for verification.
+- `APP_ATTEST_ALLOW_DEVELOPMENT=false`: production-only by default. TestFlight uses
+  production App Attest. APNs environment is a separate setting.
+- Existing `MAX_DEVICES` applies to BOTH invitation and automatic registrations.
+  Existing registrations count toward this limit.
+
+### Client contract
+
+1. Generate an App Attest key and a cryptographically random 32-byte device secret.
+   Encode the secret as 64 lowercase hex characters. Persist pending state securely
+   before sending requests. Never ship a shared invite or APNs key in the client.
+2. POST `/v1/enrollment/challenge` with:
+   `{ "keyId": "<Apple key ID, canonical base64>", "credentialHash": "<SHA256 of UTF-8 hex secret, lowercase hex>" }`.
+   Response 201: `{ "challengeId": "<32 hex chars>", "challenge": "<random base64 string>", "expiresAt": <Unix seconds> }`.
+3. Hash the UTF-8 bytes of the returned **challenge string**, NOT base64-decoded bytes,
+   with SHA256. Pass that hash to `DCAppAttestService.attestKey` as clientDataHash.
+4. Persist the resulting proof while enrollment is pending. POST
+   `/v1/enrollment/complete` with `{ "challengeId": "...", "attestation": "<base64 proof>" }`.
+   Response 201 (or 200 on exact retry): `{ "deviceId": "..." }`.
+5. Save `deviceToken = deviceId + "." + secret` into the existing Keychain credentials.
+   Existing API bearer authentication then works without user-entered codes.
+   Clear the pending proof/secret copy only after credentials are durably saved.
+
+The raw device secret is never returned by the server or sent during enrollment.
+A captured completion response only contains the public device ID. The server holds
+its SHA256 hash, the attested public key/key ID and environment. It does not store
+Apple receipts or full attestations. No sensitive enrollment payloads are logged.
+
+### Retry, limits and failure behavior
+
+- Challenges expire after five minutes and are invalidated by a server restart.
+  An expired/missing challenge returns 410. The client must restart enrollment with
+  a new App Attest key; a successful Apple attestation cannot simply be repeated
+  against a different challenge with the same key. Avoid automatic tight retry loops.
+- Exact completion retries within the challenge window return the same device ID.
+  Different proof replays fail. A key cannot register twice, even after revocation.
+- Invalid proofs consume the pending challenge. No automatic unverified fallback.
+- 10 enrollment requests per IP/minute and 30 globally/minute; challenge and complete
+  both count. At most 200 challenges reside in memory. Body limit is 32 KiB.
+- Device caps are checked atomically on completion, including concurrent requests.
+- Unsupported App Attest devices cannot use automatic enrollment. Private
+  invitation setup requires the policy above; there is no automatic fallback.
+- Attestation proves app/device integrity, not Sleeper account ownership or that a
+  person was invited to TestFlight. It does not prevent a genuine app from making
+  repeated installations; caps and rate limits remain necessary.
+- Normal API calls continue using bearer credentials; per-request App Attest
+  assertions are not implemented.
+
+### Credential recovery and push environments
+
+`GET /v1/devices/me` requires bearer authentication, returns `deviceId`, and sets
+`Cache-Control: no-store`. The client can use it to recover an enrollment that
+committed before its response was lost, even after challenge expiry or restart.
+
+Use `APNS_KEY_ID` with `APNS_KEY_P8` or `APNS_KEY_FILE` for the default signer.
+An optional separate production signer uses `APNS_PRODUCTION_KEY_ID` with
+`APNS_PRODUCTION_KEY_P8` or `APNS_PRODUCTION_KEY_FILE`. Both production values
+must be present together. Production activities select that signer when supplied;
+otherwise the default signer is used. A signing key must support the requested
+APNs environment. Never include private keys in Git or the iOS app.
+
+## Testing
+
+Run `npm test` for the server regression suite. It covers authentication, activity
+ownership and rotation, polling/retries, enrollment/replay, and compressed-body
+rejection. General JSON bodies are limited to 8 KiB; enrollment bodies to 32 KiB.
+Both parsers reject compressed request bodies. Mocked tests do not prove Apple
+acceptance, device delivery timing, or immunity to all attacks.
+
+Run `npm run test:load` for the synthetic twelve-user benchmark; results are written
+to `load-test-results.json`. The measurements below are historical, not a fresh run
+or a capacity guarantee for the current code.
+
+Four separate Node processes were tested: idle, 12 users sharing a league, 12 users in separate leagues, and separate leagues with failures. Active scenarios each advanced a simulated clock through 360 polling cycles (7.5 hours at 75 seconds/cycle), with every user refreshing through the real authenticated HTTP API every cycle and every score changing. The real caching, matchup calculation, poller, ownership checks, and disk-backed SQLite transaction code ran. The HTTP load generator ran inside the measured process, so its overhead is included.
+
+This is an accelerated workload, NOT a 7.5-hour wall-clock soak. Each active run finished in about 1.4–1.6 seconds; this does not measure real internet latency, a full game's memory behavior, or phone delivery. The idle baseline lasted 10 seconds and includes a frequent measurement timer.
+
+### Historical measurements (October 21, 2026)
+
+- Idle: mean resident memory 59.6 MiB, peak 59.7 MiB; 0.072 CPU seconds over 10 wall-clock seconds.
+- Shared league: mean 160.5 MiB, peak 191.3 MiB; 1.134 CPU seconds for 360 cycles. 4,344 HTTP requests, no errors, 4,320 simulated push attempts, 635 simulated upstream fetches. Local HTTP p95 2.88 ms.
+- Twelve leagues: mean 161.5 MiB, peak 188.9 MiB; 1.319 CPU seconds for 360 cycles. 4,344 HTTP requests, no errors, 4,320 simulated push attempts, 7,608 simulated upstream fetches. Local HTTP p95 3.32 ms.
+- Outages: mean 161.9 MiB, peak 189.9 MiB. Five consecutive polling cycles failed upstream; exactly 60 foreground requests returned expected errors. Every tenth simulated push failed (426 failures). All 12 registrations remained active and resumed successful sends. No unexpected HTTP failures.
+- Database plus SQLite WAL/SHM files: approximately 4.01 MiB at the end of each active run. This is an end-of-run footprint, not indefinite growth of 4 MiB per session. This test does not characterize long-term device-record retention or backups.
+
+The 12-league scenario's modeled outbound bytes were 10.1 MB for the simulated 7.5 hours. This counts serialized push/API response bodies, synthetic upstream request sizes, and fixed header allowances. It is NOT packet-level network measurement; no TLS handshakes, compression, real header sizes, or retransmissions were captured. Extrapolation to 80 active hours/month is about 108 MB; 720 continuously active hours would be about 971 MB. Use a larger allowance in budgeting.
+
+No real APNs keys, tokens, invitations, or production databases are read by the harness. Push delivery and Sleeper responses are mocked; projections are disabled. No phone notification is sent. Temporary databases are removed after each scenario.

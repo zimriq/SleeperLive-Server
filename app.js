@@ -1,4 +1,7 @@
 import express from 'express';
+import { revokeDevice } from './revoke-device.js';
+import { clientIP } from './client-ip.js';
+import { createApiRateLimiter } from './rate-limit.js';
 import { enrollmentRouter } from './enrollment.js';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { snapshot } from './sleeper.js';
@@ -6,19 +9,45 @@ const hash = text=>createHash('sha256').update(text).digest('hex');
 const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(b),'hex'));
 const fail=(status,error)=>Object.assign(new Error(error),{status});
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
-  const app=express(), seconds=()=>Math.floor(now()/1000), hits=new Map();
-  app.disable('x-powered-by');app.set('trust proxy',1);
-  function limit(key,max){
+  const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
+  app.disable('x-powered-by');app.set('trust proxy',false);
+  // Verify fixed-size bearer credentials using the committed, bounded memory index.
+  // Unknown credentials never allocate cache entries or trigger database reads.
+  let ingressUntil=0;
+  const budgets={anonymous:{total:0,ips:new Map()},authenticated:{total:0,ips:new Map()}};
+  app.use('/v1',(req,res,next)=>{
+    req.clientIP=clientIP(req,cfg.clientIPMode);
+    const enrollment=/^\/enrollment(?:\/|$)/i.test(req.path)||
+      (req.method==='POST'&&/^\/devices\/?$/i.test(req.path));
+    const match=!enrollment&&/^Bearer ([a-f0-9]{32})\.([a-f0-9]{64})$/.exec(req.get('authorization')??'');
+    const credential=match&&store.credentialHash(match[1]);
+    if(credential&&equals(hash(match[2]),credential)){
+      req.deviceId=match[1];req.credentialHash=credential;
+    }
     const t=now();
-    for(const [k,v] of hits)if(v.until<t)hits.delete(k);
-    if(!hits.has(key)){if(hits.size>=5000)throw fail(429,'rate_limited');hits.set(key,{n:0,until:t+60000});}
-    if(++hits.get(key).n>max)throw fail(429,'rate_limited');
-  }
+    if(t>=ingressUntil){
+      ingressUntil=t+60000;
+      for(const budget of Object.values(budgets)){budget.total=0;budget.ips.clear();}
+    }
+    const budget=req.deviceId?budgets.authenticated:budgets.anonymous;
+    const count=budget.ips.get(req.clientIP)??0;
+    if(budget.total>=(cfg.ingressGlobal??1200)||count>=(cfg.ingressPerIP??400)){
+      return res.status(429).set('Retry-After',String(Math.max(1,Math.ceil((ingressUntil-t)/1000))))
+        .set('Cache-Control','no-store').json({error:'rate_limited'});
+    }
+    // Rejected devices must not spend other users' shared admission allowance.
+    if(req.deviceId)limit(`device:${req.deviceId}`,30);
+    budget.total++;budget.ips.set(req.clientIP,count+1);
+    next();
+  });
   app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));
-  app.use(express.json({limit:'8kb'}));
-  app.get('/health',(_,res)=>res.json({ok:true,mode:cfg.mode,poller:poller?.status()}));
+  app.use(express.json({limit:'8kb',inflate:false}));
+  // Public liveness only. Preserve the iOS mode contract without exposing internal errors.
+  app.get('/health',(_,res)=>res.set('Cache-Control','no-store').json({ok:true,mode:cfg.mode}));
   app.post('/v1/devices',(req,res)=>{
-    limit(`ip:${req.ip}`,10);
+    res.set('Cache-Control','no-store');
+    if(!(cfg.inviteEnabled ?? !cfg.attestEnabled))throw fail(404,'not_found');
+    limit(`ip:${req.clientIP}`,10);
     if(typeof req.body?.inviteCode!=='string' || !equals(req.body.inviteCode,cfg.invite))throw fail(403,'invalid_invite');
     const id=randomBytes(16).toString('hex'), secret=randomBytes(32).toString('hex');
     store.change(s=>{
@@ -28,10 +57,10 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     res.status(201).json({deviceId:id,deviceToken:`${id}.${secret}`});
   });
   app.use('/v1',(req,res,next)=>{
-    const match=/^Bearer ([a-f0-9]{32})\.([a-f0-9]{64})$/.exec(req.get('authorization')??'');
-    const device=match && store.read().devices[match[1]];
-    if(!device || device.revoked || !equals(hash(match[2]),device.hash))return res.status(401).json({error:'unauthorized'});
-    req.deviceId=match[1];try{limit(`device:${req.deviceId}`,30);next();}catch(e){next(e);}
+    // Recheck after body parsing: a concurrent request may have revoked the device.
+    if(!req.deviceId||store.credentialHash(req.deviceId)!==req.credentialHash)
+      return res.status(401).json({error:'unauthorized'});
+    next();
   });
   function identity(body){
     const {leagueId}=body,week=Number(body.week),rosterId=Number(body.rosterId);
@@ -83,7 +112,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     res.set('Cache-Control','no-store').json({deviceId:req.deviceId});
   });
   app.delete('/v1/devices/me',(req,res)=>{
-    store.change(s=>{s.devices[req.deviceId].revoked=true;for(const a of Object.values(s.activities))if(a.deviceId===req.deviceId&&a.status==='active'){a.status='ending';a.version++;a.nextAttempt=0;}});
+    revokeDevice(store,req.deviceId);
     res.status(204).end();
   });
   app.use((req,res)=>res.status(404).json({error:'not_found'}));

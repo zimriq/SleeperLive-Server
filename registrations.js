@@ -12,7 +12,14 @@ export function openStore(path) {
     INSERT OR IGNORE INTO state VALUES (1, '{"devices":{},"activities":{}}');`);
   const read = db.prepare('SELECT value FROM state WHERE id=1');
   const write = db.prepare('UPDATE state SET value=? WHERE id=1');
+  const index = state => {
+    const entries=Object.entries(state.devices).filter(([,device])=>!device.revoked);
+    if(entries.length>1000)throw Error('Active device index capacity exceeded');
+    return new Map(entries.map(([id,device])=>[id,device.hash]));
+  };
+  let credentials=index(JSON.parse(read.get().value));
   return {
+    credentialHash: id => credentials.get(id),
     read: () => JSON.parse(read.get().value),
     change(fn) {
       db.exec('BEGIN IMMEDIATE');
@@ -20,7 +27,14 @@ export function openStore(path) {
         const state = JSON.parse(read.get().value);
         const result = fn(state);
         if (result instanceof Promise) throw new Error('Transactions must be synchronous');
-        write.run(JSON.stringify(state)); db.exec('COMMIT'); return result;
+        // Keep replay-blocking IDs, but discard authentication material no longer
+        // needed for revoked devices. Also covers old records on the next commit.
+        for(const device of Object.values(state.devices)){
+          if(device.revoked){delete device.hash;delete device.attestPublicKey;}
+        }
+        const nextCredentials=index(state);
+        write.run(JSON.stringify(state)); db.exec('COMMIT');
+        credentials=nextCredentials;return result;
       } catch (e) { db.exec('ROLLBACK'); throw e; }
     },
     close: () => db.close(),

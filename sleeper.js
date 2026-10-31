@@ -1,8 +1,29 @@
 const ROOT = 'https://api.sleeper.app/v1';
-export async function getJSON(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
-  if (!res.ok) throw new Error(`Upstream status ${res.status}`);
-  return res.json();
+export async function getJSON(url, {fetchImpl=fetch} = {}) {
+  // The all-player catalog is substantially larger than league or weekly feeds.
+  const maxBytes=url === `${ROOT}/players/nfl` ? 32*1024*1024 : 8*1024*1024;
+  const res = await fetchImpl(url, { signal: AbortSignal.timeout(12000) });
+  if (!res.ok) {
+    await res.body?.cancel().catch(()=>{});
+    throw new Error(`Upstream status ${res.status}`);
+  }
+  if (!res.body) throw new Error('Missing upstream body');
+  const reader=res.body.getReader(), chunks=[];
+  let size=0, complete=false;
+  try {
+    while(true){
+      const {done,value}=await reader.read();
+      if(done){complete=true;break;}
+      size+=value.byteLength;
+      // Count decoded stream bytes, not Content-Length (which may be absent or compressed).
+      if(size>maxBytes)throw new Error('Upstream response too large');
+      chunks.push(Buffer.from(value));
+    }
+    return JSON.parse(Buffer.concat(chunks,size).toString('utf8'));
+  } finally {
+    if(!complete)await reader.cancel().catch(()=>{});
+    reader.releaseLock();
+  }
 }
 export function createSleeper(load = getJSON, now = Date.now) {
   const cache = new Map(), pending = new Map();

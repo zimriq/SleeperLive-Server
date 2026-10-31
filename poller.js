@@ -4,7 +4,8 @@ export function changed(a,b) {
   return ['yourScore','opponentScore','yourProjectionKind','opponentProjectionKind'].some(k=>a[k]!==b[k]) ||
     ['yourProjected','opponentProjected'].some(k=>(a[k]===null)!==(b[k]===null) || (a[k]!==null && Math.abs(a[k]-b[k])>=0.5));
 }
-export function createPoller({store,sleeper,transport,estimator,pollMs=75000,now=Date.now,log=console.warn}) {
+export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pushConcurrency=4,now=Date.now,log=console.warn}) {
+  if(!Number.isInteger(pushConcurrency)||pushConcurrency<1||pushConcurrency>16)throw Error('Invalid push concurrency');
   let timer, running, stopped=true;
   const seconds=()=>Math.floor(now()/1000);
   const status={lastRunAt:null,lastError:null};
@@ -55,23 +56,35 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,now
         if(a.status==='ended' && seconds()-a.endedAt>86400)delete s.activities[id];
       }
     });
-    const groups=new Map();
+    const groups=new Map(), jobs=[];
     for(const a of Object.values(store.read().activities)){
       if(a.status==='ended' || a.nextAttempt>seconds())continue;
-      if(a.status==='ending'){await deliver(a.id);continue;}
+      if(a.status==='ending'){jobs.push(()=>deliver(a.id));continue;}
       const key=`${a.leagueId}:${a.week}`;
-      if(!groups.has(key))groups.set(key,[]);groups.get(key).push(a);
+      if(!groups.has(key)){
+        let pending;
+        // Fetch lazily once per league/week, shared by every activity in this tick.
+        groups.set(key,()=>pending??=Promise.all([
+          sleeper.matchups(a.leagueId,a.week),sleeper.meta(a.leagueId)
+        ]).catch(()=>{log('Sleeper unavailable; retaining last valid state');return null;}));
+      }
+      const fetchGroup=groups.get(key);
+      jobs.push(async()=>{
+        const feeds=await fetchGroup();
+        if(!feeds)return;
+        const [data,meta]=feeds;
+        await deliver(a.id,await snapshot(data,meta,a.rosterId,a.week,estimator));
+      });
     }
-    for(const group of groups.values()){
-      try{
-        const first=group[0];
-        const [data,meta]=await Promise.all([sleeper.matchups(first.leagueId,first.week),sleeper.meta(first.leagueId)]);
-        for(const a of group){
-          try{await deliver(a.id,await snapshot(data,meta,a.rosterId,a.week,estimator));}
-          catch{log('Invalid matchup data; retaining last valid state');}
-        }
-      }catch{log('Sleeper unavailable; retaining last valid state');}
-    }
+    let cursor=0;
+    const worker=async()=>{
+      while(cursor<jobs.length){
+        const job=jobs[cursor++];
+        try{await job();}catch{log('Activity update failed; retaining last valid state');}
+      }
+    };
+    // Tick and shutdown wait for all workers; one slow send occupies only one slot.
+    await Promise.all(Array.from({length:Math.min(pushConcurrency,jobs.length)},worker));
     status.lastRunAt=seconds();
   }
   return {

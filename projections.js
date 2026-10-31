@@ -64,15 +64,18 @@ export function estimateTeam(row, rules, projections, games) {
   return { points: score(row) + delta, kind: allFinal ? 'final' : 'estimate' };
 }
 export function createEstimator(load = getJSON, now = Date.now) {
-  let cache, pending, playersCache;
+  let cache, pending, playersCache, retryAfter = 0;
   return async (league, week, rows) => {
     const key = `${league.season}:${week}`;
     const fetchFeeds = async () => {
-      const [projections, board, players] = await Promise.all([
+      const feeds = await Promise.allSettled([
         load(`https://api.sleeper.com/projections/nfl/${league.season}/${week}?season_type=regular`),
         load(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${league.season}&seasontype=2&week=${week}`),
         playersCache && now()-playersCache.at<86400000 ? playersCache.value : load("https://api.sleeper.app/v1/players/nfl").then(value=>{playersCache={at:now(),value};return value;}),
       ]);
+      // Wait for every request to settle before allowing another batch.
+      if (feeds.some(feed => feed.status === 'rejected')) throw new Error('Estimate feed unavailable');
+      const [projections, board, players] = feeds.map(feed => feed.value);
       if (!Array.isArray(projections) || !Array.isArray(board.events) || !board.events.length) throw new Error('Invalid estimate feeds');
       if (board.week?.number !== week || board.season?.year !== Number(league.season)) throw new Error('Wrong scoreboard season/week');
       const games = new Map();
@@ -88,15 +91,26 @@ export function createEstimator(load = getJSON, now = Date.now) {
       }
       cache = { key, at: now(), values, games }; return cache;
     };
-    if (!cache || cache.key !== key || now()-cache.at > 60000) {
-      if (!pending || pending.key !== key) {
-        const task = fetchFeeds(); pending = {key, task};
-        task.finally(() => { if (pending?.task === task) pending = null; }).catch(()=>{});
+    // Shared cooldown also covers different weeks: changing a request key must not
+    // bypass protection for the same upstream services. Keep only one batch in flight.
+    const fresh = () => cache?.key === key && now()-cache.at <= 60000;
+    if (!fresh()) {
+      if (pending && pending.key !== key) await pending.task;
+      if (!fresh()) {
+        if (now() < retryAfter) return rows.map(()=>null);
+        if (!pending) {
+          const task = fetchFeeds().catch(() => {
+            retryAfter = now()+60000;
+            return null;
+          });
+          pending = {key, task};
+          task.finally(() => { if (pending?.task === task) pending = null; }).catch(()=>{});
+        }
+        const result = await pending.task;
+        if (!result || result.key !== key) return rows.map(()=>null);
+        return rows.map(row => estimateTeam(row, league.scoring_settings, result.values, result.games));
       }
-      await pending.task;
     }
-    const result = cache;
-    if (result.key !== key) return rows.map(()=>null);
-    return rows.map(row => estimateTeam(row, league.scoring_settings, result.values, result.games));
+    return rows.map(row => estimateTeam(row, league.scoring_settings, cache.values, cache.games));
   };
 }
