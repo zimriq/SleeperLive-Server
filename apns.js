@@ -9,7 +9,7 @@ export function pushPriority(message) {
 }
 export function classify(status, reason) {
   if (status === 200) return 'ok';
-  if (status === 410 && reason === 'Unregistered') return 'dead';
+  if (status === 410 && ['Unregistered', 'ExpiredToken'].includes(reason)) return 'dead';
   // BadDeviceToken can mean a wrong environment/topic: don't permanently discard on configuration errors.
   return 'retry';
 }

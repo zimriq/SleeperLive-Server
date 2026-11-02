@@ -47,11 +47,13 @@ test('missing opponents and invalid score data never produce fabricated zero',as
   await assert.rejects(snapshot({rows:[rows[0]],updatedAt:T},meta,1,6));
   await assert.rejects(snapshot({rows:[{...rows[0],points:null},rows[1]],updatedAt:T},meta,1,6));
 });
-test('APNs end includes valid state; only Unregistered is terminal',()=>{
+test('APNs end includes valid state; expired and unregistered destination tokens are terminal',()=>{
   const state=activity().state;
   assert.deepEqual(payload({state,event:'end',timestamp:T}).aps['content-state'],state);
   assert.equal(classify(403,'InvalidProviderToken'),'retry');assert.equal(classify(400,'BadDeviceToken'),'retry');
-  assert.equal(classify(410,'Unregistered'),'dead');assert.equal(classify(200),'ok');
+  assert.equal(classify(410,'Unregistered'),'dead');assert.equal(classify(410,'ExpiredToken'),'dead');
+  assert.equal(classify(403,'ExpiredProviderToken'),'retry');assert.equal(classify(403,'ExpiredToken'),'retry');
+  assert.equal(classify(410,'UnknownReason'),'retry');assert.equal(classify(200),'ok');
 });
 test('API rejects unauthenticated requests and malformed registrations',async t=>{
   const f=await fixture(t);
@@ -91,9 +93,25 @@ test('same league polling shared, unchanged scores silent, freshness heartbeat s
 test('old-token rejection after rotation cannot end replacement',async()=>{
   const store=openStore(':memory:');store.change(s=>s.activities.a=activity({id:'a'}));
   const poll=createPoller({store,sleeper,now:()=>T*1000,transport:{send:async()=>{
-    store.change(s=>{s.activities.a.token='new';s.activities.a.version++;});return {kind:'dead'};
+    store.change(s=>{s.activities.a.token='new';s.activities.a.version++;});return {kind:classify(410,'ExpiredToken'),status:410,reason:'ExpiredToken'};
   }}});
   await poll.tick();assert.equal(store.read().activities.a.status,'active');assert.equal(store.read().activities.a.token,'new');store.close();
+});
+test('expired APNs destination token ends only its activity and is never retried',async()=>{
+  let time=T,sends=0;const logs=[],store=openStore(':memory:');
+  store.change(s=>{s.devices.d={hash:'retained-device-hash'};s.activities.a=activity({id:'a'});});
+  const poll=createPoller({store,sleeper,now:()=>time*1000,log:(...args)=>logs.push(args),transport:{send:async()=>{
+    sends++;return {kind:classify(410,'ExpiredToken'),status:410,reason:'ExpiredToken'};
+  }}});
+  try{
+    await poll.tick();
+    const state=store.read();
+    assert.equal(state.activities.a.status,'ended');assert.equal(state.activities.a.token,null);
+    assert.equal(state.activities.a.endedAt,T);assert.equal(state.devices.d.hash,'retained-device-hash');
+    for(const delay of [75,150,300,900]){time+=delay;await poll.tick();}
+    assert.equal(sends,1,'permanently expired token must never be retried');
+    assert.deepEqual(logs,[],'terminal expiry must not produce retry warnings');
+  }finally{store.close();}
 });
 test('expiry before first success sends initial content and stops polling',async()=>{
   const store=openStore(':memory:');store.change(s=>s.activities.a=activity({id:'a',expiresAt:T}));
