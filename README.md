@@ -453,3 +453,32 @@ This is an accelerated workload, NOT a 7.5-hour wall-clock soak. Each active run
 The 12-league scenario's modeled outbound bytes were 10.1 MB for the simulated 7.5 hours. This counts serialized push/API response bodies, synthetic upstream request sizes, and fixed header allowances. It is NOT packet-level network measurement; no TLS handshakes, compression, real header sizes, or retransmissions were captured. Extrapolation to 80 active hours/month is about 108 MB; 720 continuously active hours would be about 971 MB. Use a larger allowance in budgeting.
 
 No real APNs keys, tokens, invitations, or production databases are read by the harness. Push delivery and Sleeper responses are mocked; projections are disabled. No phone notification is sent. Temporary databases are removed after each scenario.
+
+
+## User-initiated device-data deletion
+
+`DELETE /v1/devices/me/data`, authenticated with the current device bearer credential,
+transactionally removes that device record (including App Attest identifiers and keys)
+and all of its active/ending/ended activity records from the current logical database.
+The committed credential index immediately rejects the old credential. Other devices
+are untouched. The activity-registration transaction rechecks that the device still
+exists after asynchronous upstream work, preventing a late request from recreating data.
+The iOS client ends local activities before requesting deletion; the server does not
+retain deleted push tokens to send further end notifications. An already in-flight push
+may still finish, but its response cannot recreate a removed activity.
+
+Deploy this server change before distributing the matching iOS client. The old
+`DELETE /v1/devices/me` remains access revocation with replay protection, not erasure.
+The new route does not retain a replay-blocking device/attestation tombstone. Future
+fresh device enrollment remains possible. Completed enrollment challenges cannot
+recreate a deleted device using their cached response, because completion verifies the
+record still exists. Unfinished challenges have a five-minute in-memory lifetime.
+
+This is logical deletion, not secure physical erasure of historical SQLite pages/WAL,
+Railway logs, support mail, or backups. Backup/log retention and restoration procedures
+still need a defined policy; restoring an older backup can restore deleted data and
+requires reconciling deletion requests before serving traffic. No backup purge or
+production database deletion is performed by this change. Do not claim complete erasure
+from all systems or a retention deadline until those operational details are settled.
+A lost successful HTTP response can leave the client unable to confirm deletion: it
+must not interpret a later 401 (which might also mean revocation) as proof of erasure.
