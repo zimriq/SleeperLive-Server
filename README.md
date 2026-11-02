@@ -100,7 +100,9 @@ outgrows its limit, inspect its size and adjust deliberately.
   Unchanged-score heartbeats, projection-only changes, and initial sync with unchanged
   scores use priority 5; end pushes use 10. No alerts/sounds. Failed sends do not
   advance the accepted-score baseline. iOS delivery budgets still apply.
-- APNs Unregistered ends that token's activity. Other failures back off up to 15
+- APNs 410 Unregistered or ExpiredToken ends that token's activity and clears its
+  push token. A late response for a replaced token cannot end its replacement.
+  Other failures back off up to 15
   minutes; inspect server logs for configuration failures. Rotation resets backoff.
 - End locally in the app, then DELETE the registration. Server also expires it eight
   hours after its actual start. A Sunday activity must be restarted for Monday.
