@@ -72,3 +72,14 @@ The user confirmed the develop deployment revision. The public endpoint https://
 The initial manual backup was written outside the volume at /app/data/backups. The user then set BACKUP_DIR=/data/backups on development only and supplied a successful backup result there, with retention disabled. The backup command performs its integrity check before reporting success. Scheduled backups, retention, restoration and log settings remain unverified.
 
 An isolated SleeperLive Dev app build has been prepared for registration/deletion tests. Its app identifier is com.zimri.SleeperLive.Develop; the development Railway service must use that APNS_BUNDLE_ID for App Attest verification. That variable change has not been performed or verified by the agent. Keep APNS_MODE=dry-run initially and leave production unchanged. Remote Live Activity start is intentionally blocked in dry-run; real push and owned activity-record deletion still require a later controlled test. No production deployment, database mutation, or pull request merge has been performed as part of this preparation.
+
+## Physical-device registration/deletion cycle — November 3, 2026
+
+Environment: develop, dry-run. Evidence below is user-reported from the Dev app and read-only SSH count queries, not direct agent access to the deployed database.
+
+- The physical iPhone's SleeperLive Dev app showed Device registration saved. The development database reported one active device.
+- Delete device data reported success. The subsequent read-only query reported active devices=0, total device records=0, activity records=0. This confirms logical removal of the device record in that test environment, rather than only a revocation flag.
+- After fully closing/reopening the Dev app without opting in again, background updates remained off and the count check remained at zero (user confirmed).
+- Explicitly enabling background updates again produced active devices=1, total device records=1, activity records=0. Fresh enrollment after deletion therefore passed.
+
+No actual server activity records were present during this cycle, so deployed owned-activity deletion, multi-device isolation, in-flight request races, and real APNs delivery are not established by these results. Existing local automated tests cover some of those cases, but live verification is separate. Persistence of an actual registered device across a service restart remains to be checked; the earlier restart used only a marker file. The exact deployed revision still needs to be recorded, even though the user confirmed the intended develop revision. No production checks or merge are implied.
