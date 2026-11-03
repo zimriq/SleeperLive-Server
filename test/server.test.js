@@ -564,3 +564,45 @@ test('credential index reflects only committed state and rebuilds after restart'
     assert.equal(store.credentialHash('unknown'),undefined);
   }finally{store.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+
+test('device data deletion removes only owned records and invalidates access immediately',async t=>{
+  const f=await fixture(t);
+  const other=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  const id=f.token.split('.')[0],otherID=other.deviceId;
+  await f.call('/v1/activities/owned-live','PUT',registration,f.token);
+  await f.call('/v1/activities/other-live','PUT',registration,other.deviceToken);
+  f.store.change(s=>{
+    s.devices[id].attestKeyId='test-attestation-key';
+    s.activities['owned-ended']={...s.activities['owned-live'],status:'ended'};
+  });
+  assert.equal((await f.call('/v1/devices/me/data','DELETE')).status,401);
+  const response=await f.call('/v1/devices/me/data','DELETE',undefined,f.token);
+  assert.equal(response.status,204);
+  assert.equal(response.headers.get('cache-control'),'no-store');
+  const state=f.store.read();
+  assert.equal(state.devices[id],undefined);
+  assert.ok(state.devices[otherID]);
+  assert.equal(state.activities['owned-live'],undefined);
+  assert.equal(state.activities['owned-ended'],undefined);
+  assert.ok(state.activities['other-live']);
+  assert.equal(f.store.credentialHash(id),undefined);
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,f.token)).status,401);
+  assert.equal((await f.call('/v1/activities/new-after-delete','PUT',registration,f.token)).status,401);
+  assert.equal((await f.call('/v1/devices/me','GET',undefined,other.deviceToken)).status,200);
+});
+
+test('in-flight registration cannot recreate activity records after device data deletion',async t=>{
+  let entered,release;
+  const started=new Promise(resolve=>entered=resolve),gate=new Promise(resolve=>release=resolve);
+  const f=await fixture(t,{sleeper:{...sleeper,matchups:async()=>{entered();await gate;return {rows,updatedAt:T};}}});
+  const pending=f.call('/v1/activities/race-delete','PUT',registration,f.token);
+  try{
+    await started;
+    assert.equal((await f.call('/v1/devices/me/data','DELETE',undefined,f.token)).status,204);
+    release();
+    assert.equal((await pending).status,401);
+    assert.equal(f.store.read().activities['race-delete'],undefined);
+    assert.equal(Object.keys(f.store.read().devices).length,0);
+  }finally{release();await pending;}
+});

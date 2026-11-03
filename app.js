@@ -86,7 +86,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     const existing=store.read().activities[id];if(existing)check(existing);
     const snap=existing?null:await getSnapshot(p);
     const result=store.change(s=>{
-      if(s.devices[req.deviceId]?.revoked)throw fail(401,'unauthorized');
+      if(!s.devices[req.deviceId]||s.devices[req.deviceId].revoked)throw fail(401,'unauthorized');
       const a=s.activities[id];
       if(a){check(a);if(a.token!==b.pushToken||a.env!==b.apnsEnvironment){a.token=b.pushToken;a.env=b.apnsEnvironment;a.version++;a.force=true;a.nextAttempt=0;a.failures=0;}return {created:false,expiresAt:a.expiresAt};}
       const active=Object.values(s.activities).filter(a=>a.status!=='ended'&&a.expiresAt>seconds());
@@ -110,6 +110,16 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   });
   app.get('/v1/devices/me',(req,res)=>{
     res.set('Cache-Control','no-store').json({deviceId:req.deviceId});
+  });
+  // Explicit erasure is separate from access revocation/replay protection.
+  app.delete('/v1/devices/me/data',(req,res)=>{
+    store.change(s=>{
+      for(const [id,activity] of Object.entries(s.activities)){
+        if(activity.deviceId===req.deviceId)delete s.activities[id];
+      }
+      delete s.devices[req.deviceId];
+    });
+    res.set('Cache-Control','no-store').status(204).end();
   });
   app.delete('/v1/devices/me',(req,res)=>{
     revokeDevice(store,req.deviceId);
