@@ -1,0 +1,66 @@
+# Server change ledger and pre-App-Store review
+
+Recorded November 3, 2026. Keep this file on **develop**. This is the handoff for the production/Railway review after app features are complete. Local implementation and tests do not establish deployed behavior. Do not record private keys, bearer credentials, database contents, or raw user logs here.
+
+## Ongoing record
+
+For every future server change, add its purpose, affected files, tests, configuration/deployment requirements, and external checks here. After committing, add the commit reference when practical. Keep work on develop; merging to main and deploying production require the owner's instruction. For each production verification, record date, deployed revision, sanitized evidence, and outcome. Until then, mark it unverified.
+
+## Changes from this app-readiness work
+
+- **4a2ea2d — authenticated device-data deletion.** app.js adds DELETE /v1/devices/me/data, removes the current device and all owned activity records transactionally, and prevents a late registration from recreating them. Other devices remain intact. Existing DELETE /v1/devices/me is still revocation. Server suite passed 79 tests at implementation; matching app suite passed 21. Deploy the server endpoint before using the new app action. Production deployment and device verification: **unverified**. Historical SQLite pages, logs and backups are not purged by this endpoint. A lost success response followed by 401 remains ambiguous in the app and needs support verification, not a false success claim.
+- **55f6ac1 — optional backup retention and integrity checks.** backup.js verifies the new copy before publishing it without overwriting an existing filename. BACKUP_RETENTION_DAYS enables cleanup only when explicitly set to an integer 1–365. Unset means no cleanup. Eligible files must have generated UTC names and old modification times; symlinks, directories, custom copies and the live database are preserved. Failed backup creation does not prune. Six focused tests passed. No production backup or setting was touched. Schedule, selected retention period, Railway volume backups and restore reconciliation: **unverified**. Missed runs mean the configured age is not a wall-clock deletion deadline.
+- **This documentation checkpoint.** Records earlier server changes and production checks below. It changes no runtime behavior or deployment settings.
+
+## Earlier server history to recheck
+
+These entries are from local Git history, not a claim that every change is deployed or has been independently retested in this review:
+
+- 2b9a57f — stop retrying expired Live Activity push tokens.
+- 0ba8d0e — restrict permissions for new server and backup files.
+- f7e58e2 — prevent over-limit devices from exhausting shared allowances.
+- 4cb23b9 — minimize retained credentials for revoked devices.
+- 40cfecf — bound incoming HTTP headers and upload duration.
+- ae6be3a — offline operator device revocation.
+- aa174f3 — reserve authenticated access during anonymous request floods.
+- 34692ff — explicit client-IP trust and Railway edge-header validation.
+- e45a35e — reserve rate-limit capacity for authenticated devices.
+- e67d4a4 — bound upstream JSON responses and cancel rejected bodies.
+- 8f5b795 — bounded concurrent delivery to isolate slow pushes.
+- 4513a30 — avoid full counter scans in the rate limiter.
+- 2f0dfd1 — validated configurable API admission limits.
+- d8bb5ac — remove internal details from public health responses.
+- 2ff35b9 — back off failed projection feeds and deduplicate retries.
+- 908d4d0 — disable invite enrollment by default with App Attest.
+- 7da596b — limit requests before authentication and consolidate documentation.
+- e4baf41 — reject compressed requests and update vulnerable dependencies.
+- 1959c08 — TestFlight push keys and enrollment recovery.
+- 7222ef1 — protected automatic device enrollment.
+- ea1ca29 — initial polling, score-change pushes, and load tests.
+
+## Railway and external verification before release
+
+All items start **unverified**. Perform checks with a disposable registration where mutation is needed.
+
+1. **Deployed revision and branch.** Record which branch Railway deploys and the exact revision running. Confirm deletion and backup features are included. Pushing develop alone does not prove a production deployment. Keep a rollback plan; an older server may not support the latest app endpoint.
+2. **Persistent database.** Confirm DB_PATH points to the mounted persistent volume, survives restart/redeploy, and has appropriate access permissions. The store/credential index assumes one server instance; verify replica count and no other process writes the database. Never use the offline revocation tool while the server is running.
+3. **Device verification.** Confirm APP_ATTEST_ENABLED and the correct app identifier prefix/bundle identifier. Check production/development acceptance settings for intended builds. Confirm the app registers without user-entered URLs/invites; disable public invitation enrollment when using production attestation. Do not expose invitation or Apple signing secrets in documentation or logs.
+4. **Production push delivery.** Confirm APNS_MODE=live, matching bundle/team identity, appropriate Apple signing key environment and paired production-key configuration if used. Test a signed physical iPhone/TestFlight build, foreground/background/locked states, token rotation, expiration, stopping and deletion. Apple acceptance is not proof that the phone displayed the update.
+5. **IP trust and rate limits.** Verify the deployed CLIENT_IP_MODE against the actual Railway HTTP edge path. railway-public requires the listener to be reachable through that trusted edge, without a bypass accepting forged headers. Verify spoofing resistance, independent anonymous/authenticated admission budgets, configured per-IP/global caps, Retry-After and proxy behavior in production. Local tests do not prove edge behavior.
+6. **Resources and hosting limits.** Check device/activity caps, push concurrency, polling interval, upstream timeout/body limits, real game-day traffic, memory/CPU/network/storage growth, restart behavior, platform timeouts and spending alerts. Historical load tests do not guarantee present hosting cost or capacity.
+7. **Backups.** Identify manual SQLite copies, Railway volume backups and off-site copies separately. Verify an actual schedule exists, where the job runs, access permissions, retention values, cleanup outcomes, recovery location, and restore testing. BACKUP_RETENTION_DAYS only affects this tool's directory when that command runs; it does not manage Railway's own backups.
+8. **Deletion and restoration.** Verify owned device/activity records are removed and other devices remain intact; test an in-flight registration and credential invalidation. Define how support resolves an unconfirmed deletion. Document how deleted records are prevented from becoming live again after restoring an older backup. Finalize retention for old SQLite/WAL pages, replay records from revocation, caches and backups; do not describe revocation as erasure.
+9. **Logs and diagnostics.** Inspect Railway access/application logging settings, retention and access controls without copying sensitive log contents into chat. Verify no bearer tokens, Apple keys, full attestation proofs or user payloads are logged. Determine whether retained IP/request/diagnostic data changes the privacy disclosures.
+10. **Public availability.** Confirm HTTPS/certificate behavior, public health response, API error messages, upstream Sleeper availability and outage behavior. Review any infrastructure change that adds a proxy, analytics, monitoring service or subprocessor.
+11. **Privacy and support.** Confirm operator identity/contact, support-mail retention, all processors, data uses and deletion-request handling. Update the privacy manifest and App Store answers if verified behavior differs. Publish the complete policy and connect it in the app and App Store Connect only after unresolved operational facts are settled.
+
+## Release sign-off record
+
+- Railway deployed revision: pending
+- Deletion endpoint verified on production: pending
+- Backup types, schedule and retention verified: pending
+- Hosting log retention and redaction verified: pending
+- Restore/deletion reconciliation verified: pending
+- Signed-device push delivery verified: pending
+- Privacy policy and App Store disclosures reconciled: pending
+- Owner authorizes production release: pending
