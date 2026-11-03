@@ -64,3 +64,11 @@ All items start **unverified**. Perform checks with a disposable registration wh
 - Signed-device push delivery verified: pending
 - Privacy policy and App Store disclosures reconciled: pending
 - Owner authorizes production release: pending
+
+## Development environment observations — November 3, 2026
+
+The user confirmed the develop deployment revision. The public endpoint https://sleeperlive-server-develop.up.railway.app/health was independently checked and returned ok=true/mode=dry-run. User-provided SSH output confirms environment develop and DB_PATH=/data/server.sqlite. Screenshots show /data mounts in both environments, but no unique volume IDs were captured; matching display names are not evidence of shared storage. A marker in /data survived a service restart (user-reported output). This verifies the marker, not yet device-record persistence.
+
+The initial manual backup was written outside the volume at /app/data/backups. The user then set BACKUP_DIR=/data/backups on development only and supplied a successful backup result there, with retention disabled. The backup command performs its integrity check before reporting success. Scheduled backups, retention, restoration and log settings remain unverified.
+
+An isolated SleeperLive Dev app build has been prepared for registration/deletion tests. Its app identifier is com.zimri.SleeperLive.Develop; the development Railway service must use that APNS_BUNDLE_ID for App Attest verification. That variable change has not been performed or verified by the agent. Keep APNS_MODE=dry-run initially and leave production unchanged. Remote Live Activity start is intentionally blocked in dry-run; real push and owned activity-record deletion still require a later controlled test. No production deployment, database mutation, or pull request merge has been performed as part of this preparation.
