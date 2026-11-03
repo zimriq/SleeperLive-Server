@@ -132,8 +132,37 @@ supports a single server instance; separate instances with separate databases do
 not share state. Keep the database and its backups private.
 
 `npm run backup` creates a consistent online SQLite backup, defaulting to
-`data/backups`. It is a manual command, not an automatic schedule. Keep recovery
-copies separately and test restores with the server stopped.
+`data/backups`. It is a manual command, not an automatic schedule. The source
+must already exist. Each copy is checked with SQLite quick_check and published
+without overwriting an existing filename, with permissions limited to its owner.
+Keep recovery copies separately and test restores with the server stopped.
+
+### Optional retention for tool-created backups
+
+Retention is disabled unless you explicitly set `BACKUP_RETENTION_DAYS` to an
+integer from 1 through 365. For example, choosing `7` means a successful backup
+run can remove eligible tool-created copies older than seven days. This is a
+configuration example, not an applied production policy. Unset the variable to
+keep all existing copies; `0`, empty values, fractions, and invalid values fail
+before cleanup. `BACKUP_DIR` selects the directory managed by this command.
+
+Cleanup happens only after a new valid backup has been published. It considers
+only regular files with this tool's exact UTC timestamp filename and requires
+both the filename timestamp and file modification time to be older than the
+cutoff. The new backup, live database (including hard links), symlinks, directories,
+invalid date names, and custom-named copies are preserved. If backup creation
+fails, no retention cleanup runs. If cleanup itself fails, the command reports
+failure, but the newly written valid backup may already exist. Abandoned partial
+files after a process crash are not auto-deleted.
+
+This does not configure a schedule, Railway volume-backup retention, off-site
+copies, hosting logs, or support-email retention. Old copies are cleaned only
+when this command successfully runs; seven days is not a guaranteed wall-clock
+deletion deadline if runs are missed or copies are moved/renamed. Do not claim a
+production retention period in the privacy policy until the actual configuration
+and schedule are verified. Restoring an older backup also requires reconciling
+user deletion requests before serving traffic, so deleted device data is not
+silently restored. No real backup cleanup was run while developing this feature.
 
 ## Device revocation
 
