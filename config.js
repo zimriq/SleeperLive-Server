@@ -16,7 +16,10 @@ export function config(env = process.env) {
   const attestEnabled = flag('APP_ATTEST_ENABLED');
   const inviteEnabled = env.INVITE_ENROLLMENT_ENABLED === undefined ? !attestEnabled : flag('INVITE_ENROLLMENT_ENABLED');
   if (inviteEnabled && (env.INVITE_CODE ?? '').length < 24) throw new Error('Set INVITE_CODE to a random secret of at least 24 characters');
+  const freshnessPriority=Number(env.APNS_FRESHNESS_PRIORITY??5);
+  if(![5,10].includes(freshnessPriority))throw Error('Invalid APNS_FRESHNESS_PRIORITY');
   const c = {
+    freshnessPriority,
     port: number('PORT', 3000, 1, 65535), db: env.DB_PATH ?? './data/server.sqlite',
     attestEnabled, inviteEnabled, clientIPMode,
     attestAllowDevelopment: flag('APP_ATTEST_ALLOW_DEVELOPMENT'),

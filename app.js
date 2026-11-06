@@ -8,7 +8,7 @@ import { snapshot } from './sleeper.js';
 const hash = text=>createHash('sha256').update(text).digest('hex');
 const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(b),'hex'));
 const fail=(status,error)=>Object.assign(new Error(error),{status});
-export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
+export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=console.warn}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
   app.disable('x-powered-by');app.set('trust proxy',false);
   // Verify fixed-size bearer credentials using the committed, bounded memory index.
@@ -76,19 +76,35 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   app.put('/v1/activities/:id',async(req,res)=>{
     const id=req.params.id,b=req.body??{},p=identity(b),t=seconds();
     if(!/^[A-Za-z0-9-]{8,80}$/.test(id)||typeof b.pushToken!=='string'||!/^([a-fA-F0-9]{2}){16,256}$/.test(b.pushToken)||!['development','production'].includes(b.apnsEnvironment))throw fail(400,'invalid_activity');
-    if(!Number.isInteger(b.startedAt)||b.startedAt>t+30||b.startedAt<=t-28800)throw fail(400,'invalid_started_at');
+    if(!Number.isInteger(b.startedAt))throw fail(400,'invalid_started_at');
     // Validate access before doing upstream work, then recheck after await inside the transaction.
     const check=a=>{
       if(a.deviceId!==req.deviceId)throw fail(404,'not_found');
-      if(a.status!=='active'||a.expiresAt<=seconds())throw fail(409,'activity_ended');
+      if(!['active','awaiting_token'].includes(a.status)||a.expiresAt<=seconds())throw fail(409,'activity_ended');
       if(a.leagueId!==p.leagueId||a.week!==p.week||a.rosterId!==p.rosterId||a.startedAt!==b.startedAt)throw fail(409,'identity_mismatch');
     };
     const existing=store.read().activities[id];if(existing)check(existing);
+    if(b.startedAt>t+30||b.startedAt<=t-28800)throw fail(400,'invalid_started_at');
     const snap=existing?null:await getSnapshot(p);
     const result=store.change(s=>{
       if(!s.devices[req.deviceId]||s.devices[req.deviceId].revoked)throw fail(401,'unauthorized');
       const a=s.activities[id];
-      if(a){check(a);if(a.token!==b.pushToken||a.env!==b.apnsEnvironment){a.token=b.pushToken;a.env=b.apnsEnvironment;a.version++;a.force=true;a.nextAttempt=0;a.failures=0;}return {created:false,expiresAt:a.expiresAt};}
+      if(a){
+        check(a);
+        if(a.status==='awaiting_token' && a.invalidTokenHash===hash(b.pushToken.toLowerCase()) && a.env===b.apnsEnvironment)
+          return {created:false,expiresAt:a.expiresAt,needsPushToken:true};
+        const revived=a.status==='awaiting_token';
+        // Ordinary retries remain idempotent. An explicit refresh supersedes any
+        // in-flight delivery so a late response cannot restore the old backoff.
+        const reset=a.token!==b.pushToken||a.env!==b.apnsEnvironment||b.refresh===true;
+        if(reset){
+          a.token=b.pushToken;a.env=b.apnsEnvironment;a.status='active';
+          delete a.invalidTokenHash;delete a.tokenLostAt;delete a.endReason;delete a.endedReason;
+          if(revived)log(`event=token_revived activity=${id.slice(0,8)} reason=replacement`);
+          a.version++;a.force=true;a.nextAttempt=0;a.failures=0;
+        }
+        return {created:false,expiresAt:a.expiresAt};
+      }
       const active=Object.values(s.activities).filter(a=>a.status!=='ended'&&a.expiresAt>seconds());
       if(active.length>=cfg.maxActivities||active.filter(a=>a.deviceId===req.deviceId).length>=cfg.perDevice)throw fail(429,'activity_limit');
       const expiresAt=b.startedAt+28800;
@@ -98,14 +114,15 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
         force:true,failures:0,nextAttempt:0,pushTimestamp:0};
       return {created:true,expiresAt};
     });
-    res.status(result.created?201:200).json({activityId:id,expiresAt:result.expiresAt});
+    log(`event=registered activity=${id.slice(0,8)} reason=${result.created?'created':'updated'}`);
+    res.status(result.created?201:200).json({activityId:id,expiresAt:result.expiresAt,...(result.needsPushToken?{needsPushToken:true}:{})});
   });
   app.get('/v1/activities/:id',(req,res)=>{
     const a=store.read().activities[req.params.id];if(!a||a.deviceId!==req.deviceId)throw fail(404,'not_found');
-    res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null});
+    res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:a.endReason??a.endedReason??null,needsPushToken:a.status==='awaiting_token',endedReason:a.endedReason??a.endReason??null,endedAt:a.endedAt??null});
   });
   app.delete('/v1/activities/:id',(req,res)=>{
-    store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endedAt=seconds();a.token=null;a.version++;}});
+    store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endReason='user_delete';a.endedReason='user_delete';a.endedAt=seconds();a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;a.version++;log(`event=ended activity=${a.id.slice(0,8)} reason=user_delete`);}});
     res.status(204).end();
   });
   app.get('/v1/devices/me',(req,res)=>{
@@ -115,14 +132,14 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
   app.delete('/v1/devices/me/data',(req,res)=>{
     store.change(s=>{
       for(const [id,activity] of Object.entries(s.activities)){
-        if(activity.deviceId===req.deviceId)delete s.activities[id];
+        if(activity.deviceId===req.deviceId){activity.status='ended';activity.endedReason='device_data_deleted';activity.endedAt=seconds();log(`event=ended activity=${id.slice(0,8)} reason=device_data_deleted`);delete s.activities[id];}
       }
       delete s.devices[req.deviceId];
     });
     res.set('Cache-Control','no-store').status(204).end();
   });
   app.delete('/v1/devices/me',(req,res)=>{
-    revokeDevice(store,req.deviceId);
+    revokeDevice(store,req.deviceId,{now,log});
     res.status(204).end();
   });
   app.use((req,res)=>res.status(404).json({error:'not_found'}));

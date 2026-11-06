@@ -97,13 +97,21 @@ outgrows its limit, inspect its size and adjust deliberately.
 - Scores push on change. Unchanged healthy data gets a heartbeat after 180 seconds;
   stale-date is the score fetch time + 360 seconds. Show stale state in the widget.
 - Actual score changes (either team, including corrections) use priority 10.
-  Unchanged-score heartbeats, projection-only changes, and initial sync with unchanged
-  scores use priority 5; end pushes use 10. No alerts/sounds. Failed sends do not
+  Projection-only changes use priority 5. Initial/recovery pushes use 10.
+  Unchanged-score heartbeats default to 5; end pushes use 10. No alerts/sounds. Failed sends do not
   advance the accepted-score baseline. iOS delivery budgets still apply.
-- APNs 410 Unregistered or ExpiredToken ends that token's activity and clears its
-  push token. A late response for a replaced token cannot end its replacement.
-  Other failures back off up to 15
-  minutes; inspect server logs for configuration failures. Rotation resets backoff.
+- APNs 410 Unregistered or ExpiredToken clears the invalid token and pauses the
+  activity in `awaiting_token`. A different token or environment can resume the same activity,
+  before its original eight-hour expiry. Waiting registrations still count toward
+  activity limits; deletion and expiry cannot be revived. A hash of the invalid
+  token prevents reusing it without retaining the token itself.
+- Other push failures back off up to 15 minutes. Token rotation or an authenticated
+  registration with `refresh: true` resets backoff and queues fresh delivery on
+  the next poll. Ordinary registration retries remain idempotent. Late responses
+  cannot override a replacement token or explicit refresh.
+- Registration and push-result logs identify activities, status/reason, retry time,
+  and failures without printing credentials or push tokens. Apple acceptance is
+  not confirmation that the phone displayed the update.
 - End locally in the app, then DELETE the registration. Server also expires it eight
   hours after its actual start. A Sunday activity must be restarted for Monday.
 - No automatic game-final ending yet. Final scores may receive heartbeat pushes
@@ -511,3 +519,52 @@ production database deletion is performed by this change. Do not claim complete 
 from all systems or a retention deadline until those operational details are settled.
 A lost successful HTTP response can leave the client unable to confirm deletion: it
 must not interpret a later 401 (which might also mean revocation) as proof of erasure.
+
+
+### Recovery contract (develop, November 6, 2026)
+
+`awaiting_token` registrations are paused, not ended. They do not fetch Sleeper
+or send pushes, still occupy device/global capacity, and expire at their original
+deadline. Re-uploading the same invalid token/environment returns 200 with
+`needsPushToken: true`, without changing the record. A different token or environment
+revives delivery. Duplicate uploads do not clear backoff; only `refresh: true`
+from an intentional user/foreground refresh requests that reset.
+
+GET `/v1/activities/:id` retains all prior fields and adds `needsPushToken`,
+`endedReason`, and `endedAt` (Unix seconds or null). Existing owned ended/expired
+registrations return 409 `activity_ended` before start-age validation; invalid
+start times for new registrations remain 400. Reasons are `expired`, `user_delete`,
+`device_revoked`, `device_data_deleted`, `apns_unregistered`, `end_push_accepted`,
+and `end_push_failed`. Data deletion removes the record, so its reason survives
+only in the sanitized event log. `endReason` remains as a compatibility alias.
+
+Events use `event=<name> activity=<first 8 characters> reason=<value>`; token-loss
+and push-result events can include APNs status. No push token, bearer credential,
+full activity ID, or device ID is emitted by these application events. Railway's
+incoming HTTP access logs are separate and may contain full URL paths.
+
+Deploy the server before an app build that depends on this recovery contract.
+The app main source checked locally does not GET/decode activity status; registration
+accepts any 2xx and ignores the response body. Exact approved/TestFlight binary
+provenance and physical-device compatibility still require verification. Dry-run
+cannot verify actual APNs delivery, token rotation, or locked-phone recovery.
+
+
+### Development delivery experiment — November 6, 2026
+
+Start, token replacement, and explicit refresh use priority 10 even with unchanged
+scores. Priority 5 is power-aware and Apple may group or delay it; it is unsuitable
+for treating a six-minute arrival deadline as guaranteed. `APNS_FRESHNESS_PRIORITY`
+accepts 5 (default) or 10. Set 10 on DEVELOPMENT ONLY for the next isolated test.
+In that mode, a fresh-data heartbeat is urgent after at least 180 seconds since
+the last accepted urgent update (the next poll adds delay). Projection-only pushes
+remain low priority between those heartbeats and cannot keep postponing them.
+Score changes and ending pushes remain urgent. No stale-window extension or widget
+warning suppression is included. Apple may still delay/throttle urgent updates;
+this is a bounded development experiment, not a proven fix or delivery guarantee.
+
+Push attempt/result logs now include priority, push timestamp, content timestamp,
+stale deadline (attempt), completion time and elapsed seconds (result). This allows
+matching payload time against phone receipt time without logging content or tokens.
+Remembered invalid-token hashes and loss timestamps are removed on ending as well
+as revival/deletion. Existing low-priority records and JSON fields remain readable.

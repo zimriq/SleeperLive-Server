@@ -97,7 +97,7 @@ test('old-token rejection after rotation cannot end replacement',async()=>{
   }}});
   await poll.tick();assert.equal(store.read().activities.a.status,'active');assert.equal(store.read().activities.a.token,'new');store.close();
 });
-test('expired APNs destination token ends only its activity and is never retried',async()=>{
+test('expired APNs token waits for replacement without retrying invalid destination',async()=>{
   let time=T,sends=0;const logs=[],store=openStore(':memory:');
   store.change(s=>{s.devices.d={hash:'retained-device-hash'};s.activities.a=activity({id:'a'});});
   const poll=createPoller({store,sleeper,now:()=>time*1000,log:(...args)=>logs.push(args),transport:{send:async()=>{
@@ -106,11 +106,12 @@ test('expired APNs destination token ends only its activity and is never retried
   try{
     await poll.tick();
     const state=store.read();
-    assert.equal(state.activities.a.status,'ended');assert.equal(state.activities.a.token,null);
-    assert.equal(state.activities.a.endedAt,T);assert.equal(state.devices.d.hash,'retained-device-hash');
+    assert.equal(state.activities.a.status,'awaiting_token');assert.equal(state.activities.a.token,null);
+    assert.equal(state.activities.a.endedReason,undefined);assert.equal(state.devices.d.hash,'retained-device-hash');
     for(const delay of [75,150,300,900]){time+=delay;await poll.tick();}
     assert.equal(sends,1,'permanently expired token must never be retried');
-    assert.deepEqual(logs,[],'terminal expiry must not produce retry warnings');
+    assert.ok(logs.some(entry=>entry[0].startsWith('event=token_lost ')));
+    assert.ok(!logs.some(entry=>entry[0]==='APNs retry needed'));
   }finally{store.close();}
 });
 test('expiry before first success sends initial content and stops polling',async()=>{
@@ -191,7 +192,7 @@ test('SIGKILL leaves committed SQLite registration recoverable',async()=>{
 });
 
 
-test('score changes are urgent; initial unchanged snapshot, projections, and heartbeats are not',async()=>{
+test('score changes and initial recovery are urgent; projections and default heartbeats are not',async()=>{
   let time=T, yours=10, opponent=20, projection=100;
   const store=openStore(':memory:');
   const initial={yourScore:10,opponentScore:20,yourProjected:100,opponentProjected:110,
@@ -203,7 +204,7 @@ test('score changes are urgent; initial unchanged snapshot, projections, and hea
     estimator:async()=>[{points:projection,kind:'estimate'},{points:110,kind:'estimate'}],
     transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
   try {
-    await poll.tick();assert.equal(pushPriority(sent.at(-1)),'5');
+    await poll.tick();assert.equal(pushPriority(sent.at(-1)),'10');
     time+=75;await poll.tick();assert.equal(sent.length,1);
     time+=75;yours=10.1;await poll.tick();assert.equal(pushPriority(sent.at(-1)),'10');
     time+=75;opponent=20.1;await poll.tick();assert.equal(pushPriority(sent.at(-1)),'10');
@@ -605,4 +606,175 @@ test('in-flight registration cannot recreate activity records after device data 
     assert.equal(f.store.read().activities['race-delete'],undefined);
     assert.equal(Object.keys(f.store.read().devices).length,0);
   }finally{release();await pending;}
+});
+
+
+test('invalid token requires a different token; replacement resumes delivery and cannot revive deletion',async t=>{
+  const f=await fixture(t);
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>({kind:'dead',status:410,reason:'Unregistered'})}});
+  await poll.tick();
+  assert.equal(f.store.read().activities['activity-1'].status,'awaiting_token');
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',registration,f.token)).status,200);
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,pushToken:registration.pushToken.toUpperCase()},f.token)).status,200);
+  const replacement={...registration,pushToken:'bb'.repeat(32)};
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',replacement,f.token)).status,200);
+  let sent;
+  const recovered=createPoller({store:f.store,sleeper,now:()=>(T+75)*1000,log:()=>{},transport:{send:async m=>{sent=m;return {kind:'ok'};}}});
+  await recovered.tick();assert.equal(sent.token,replacement.pushToken);
+  await f.call('/v1/activities/activity-1','DELETE',undefined,f.token);
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,pushToken:'cc'.repeat(32)},f.token)).status,409);
+});
+test('unchanged-token refresh clears backoff and invalidates late responses',async t=>{
+  const f=await fixture(t);
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  f.store.change(s=>{const a=s.activities['activity-1'];a.failures=6;a.nextAttempt=T+900;a.force=false;});
+  const oldVersion=f.store.read().activities['activity-1'].version;
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token)).status,200);
+  const a=f.store.read().activities['activity-1'];
+  assert.equal(a.nextAttempt,0);assert.equal(a.failures,0);assert.equal(a.force,true);assert.equal(a.version,oldVersion+1);
+});
+test('waiting for replacement token expires without sending a null destination',async()=>{
+  const store=openStore(':memory:');store.change(s=>s.activities.a=activity({id:'a',status:'awaiting_token',token:null,expiresAt:T}));
+  let sends=0;const poll=createPoller({store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>{sends++;return {kind:'ok'};}}});
+  await poll.tick();assert.equal(sends,0);assert.equal(store.read().activities.a.status,'ended');store.close();
+});
+
+test('refresh during push failure prevents late response from restoring backoff',async t=>{
+  const f=await fixture(t);
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  let release,entered;const started=new Promise(r=>entered=r);
+  const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:()=>{entered();return new Promise(r=>release=r);}}});
+  const tick=poll.tick();await started;
+  const refreshed=await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token);
+  assert.equal(refreshed.status,200);release({kind:'retry',reason:'Timeout'});await tick;
+  const a=f.store.read().activities['activity-1'];assert.equal(a.nextAttempt,0);assert.equal(a.failures,0);assert.equal(a.force,true);
+});
+test('waiting activities retain ownership and capacity restrictions',async t=>{
+  const f=await fixture(t,{cfg:{perDevice:1}});
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>({kind:'dead',status:410,reason:'Unregistered'})}});
+  await poll.tick();
+  assert.equal((await f.call('/v1/activities/activity-2','PUT',registration,f.token)).status,429);
+  const other=await (await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,pushToken:'bb'.repeat(32)},other.deviceToken)).status,404);
+});
+
+
+test('dead token resend is a no-op and GET exposes recoverable state',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  const logs=[];
+  const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:(...v)=>logs.push(v.join(' ')),transport:{send:async()=>({kind:'dead',status:410,reason:'Unregistered'})}});
+  await poll.tick();const before=f.store.read().activities['activity-1'];
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token)).status,200);
+  assert.deepEqual(f.store.read().activities['activity-1'],before);
+  const view=await (await f.call('/v1/activities/activity-1','GET',undefined,f.token)).json();
+  assert.equal(view.needsPushToken,true);assert.equal(view.endedReason,null);assert.equal(view.endedAt,null);
+  assert.equal(logs.filter(v=>v.startsWith('event=token_lost')).length,1);assert.match(logs.find(v=>v.startsWith('event=token_lost')),/^event=token_lost activity=activity reason=Unregistered/);
+  assert.ok(!logs.join(' ').includes('activity-1'));assert.ok(!logs.join(' ').includes(registration.pushToken));
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,apnsEnvironment:'production'},f.token)).status,200);
+  assert.equal(f.store.read().activities['activity-1'].status,'active');
+});
+test('existing expired or ended registration returns 409 before start-age checks; new invalid start returns 400',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  f.store.change(s=>{s.activities['activity-1'].expiresAt=T;});
+  const expired={...registration,startedAt:T-28800};
+  const res=await f.call('/v1/activities/activity-1','PUT',expired,f.token);
+  assert.equal(res.status,409);assert.equal((await res.json()).error,'activity_ended');
+  f.store.change(s=>{s.activities['activity-1'].status='ended';});
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',expired,f.token)).status,409);
+  assert.equal((await f.call('/v1/activities/activity-2','PUT',expired,f.token)).status,400);
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...expired,startedAt:'bad'},f.token)).status,400);
+});
+test('waiting activity does not fetch or send; expiration and revocation have reasons',async()=>{
+  const {revokeDevice}=await import('../revoke-device.js');
+  const store=openStore(':memory:');const device='d'.repeat(32);let time=T,fetches=0,sends=0;
+  store.change(s=>{s.devices[device]={hash:'hash'};s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null,expiresAt:T+10});});
+  const poll=createPoller({store,now:()=>time*1000,log:()=>{},sleeper:{matchups:async()=>{fetches++;},meta:async()=>{fetches++;}},transport:{send:async()=>{sends++;}}});
+  await poll.tick();assert.equal(fetches,0);assert.equal(sends,0);
+  time+=10;await poll.tick();assert.equal(store.read().activities.a.endedReason,'expired');assert.equal(sends,0);
+  store.change(s=>{s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null});});
+  revokeDevice(store,device,{now:()=>time*1000,log:()=>{}});
+  assert.equal(store.read().activities.a.status,'ended');assert.equal(store.read().activities.a.endedReason,'device_revoked');store.close();
+});
+test('waiting activity counts toward global cap and is removed by device-data deletion',async t=>{
+  const logs=[];const f=await fixture(t,{cfg:{maxActivities:1},log:(...v)=>logs.push(v.join(' '))});
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  f.store.change(s=>{s.activities['activity-1'].status='awaiting_token';s.activities['activity-1'].token=null;});
+  const other=await (await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  assert.equal((await f.call('/v1/activities/activity-2','PUT',registration,other.deviceToken)).status,429);
+  assert.equal((await f.call('/v1/devices/me/data','DELETE',undefined,f.token)).status,204);
+  assert.equal(f.store.read().activities['activity-1'],undefined);
+  assert.ok(logs.some(v=>v.includes('reason=device_data_deleted')));
+  assert.ok(!logs.join(' ').includes('activity-1'));
+});
+test('end push outcomes and user deletion expose distinct ended reasons',async t=>{
+  for(const [result,reason] of [[{kind:'dead',status:410,reason:'Unregistered'},'apns_unregistered'],[{kind:'ok'},'end_push_accepted'],[{kind:'retry'},'end_push_failed']]){
+    const store=openStore(':memory:');store.change(s=>s.activities.a=activity({id:'a',status:'ending',failures:5}));
+    const poll=createPoller({store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>result}});
+    await poll.tick();assert.equal(store.read().activities.a.status,'ended');assert.equal(store.read().activities.a.endedReason,reason);store.close();
+  }
+  const logs=[];const f=await fixture(t,{log:(...v)=>logs.push(v.join(' '))});
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  await f.call('/v1/activities/activity-1','DELETE',undefined,f.token);
+  const view=await (await f.call('/v1/activities/activity-1','GET',undefined,f.token)).json();
+  assert.equal(view.endedReason,'user_delete');assert.equal(view.endedAt,T);assert.equal(view.needsPushToken,false);
+  assert.ok(!logs.join(' ').includes('activity-1'));
+});
+test('explicit refresh sends on next tick while ordinary retries preserve backoff',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  f.store.change(s=>{s.activities['activity-1'].nextAttempt=T+900;});
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  assert.equal(f.store.read().activities['activity-1'].nextAttempt,T+900);
+  await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token);
+  let sends=0;const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>{sends++;return {kind:'ok'};}}});
+  await poll.tick();assert.equal(sends,1);
+});
+
+
+test('urgent freshness mode keeps projection-only pushes low and limits unchanged heartbeats',async()=>{
+  const store=openStore(':memory:');let time=T,projection=100;const sent=[];
+  const initial={yourScore:10,opponentScore:20,yourProjected:100,opponentProjected:110,yourProjectionKind:'estimate',opponentProjectionKind:'estimate',updatedAt:T};
+  store.change(s=>s.activities.a=activity({id:'a',state:initial}));
+  const poll=createPoller({store,freshnessPriority:10,now:()=>time*1000,log:()=>{},
+    sleeper:{...sleeper,matchups:async()=>({rows,updatedAt:time})},
+    estimator:async()=>[{points:projection,kind:'estimate'},{points:110,kind:'estimate'}],
+    transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
+  await poll.tick();assert.equal(sent.at(-1).priority,10);
+  time+=75;projection=95;await poll.tick();assert.equal(sent.at(-1).priority,5);
+  const before=sent.length;time+=75;await poll.tick();assert.equal(sent.length,before);
+  time+=150;await poll.tick();assert.equal(sent.at(-1).priority,10);assert.equal(sent.at(-1).cause,'heartbeat');
+  time+=75;await poll.tick();assert.equal(sent.length,before+1);store.close();
+});
+test('priority setting is opt-in and rejects unsupported values',()=>{
+  assert.equal(config({INVITE_CODE:cfg.invite}).freshnessPriority,5);
+  assert.equal(config({INVITE_CODE:cfg.invite,APNS_FRESHNESS_PRIORITY:'10'}).freshnessPriority,10);
+  for(const value of ['6','0','true',''])assert.throws(()=>config({INVITE_CODE:cfg.invite,APNS_FRESHNESS_PRIORITY:value}));
+  const store=openStore(':memory:');assert.throws(()=>createPoller({store,freshnessPriority:6}));store.close();
+});
+test('unchanged user refresh is urgent and logs payload timing without tokens',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  let time=T;const sent=[],logs=[];
+  const poll=createPoller({store:f.store,sleeper,now:()=>time*1000,log:v=>logs.push(v),transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
+  await poll.tick();await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token);
+  time+=75;await poll.tick();assert.equal(sent.at(-1).priority,10);assert.equal(sent.at(-1).cause,'recovery');
+  assert.ok(logs.some(v=>v.includes('priority=10')&&v.includes('staleAt=')));
+  assert.ok(!logs.join(' ').includes(registration.pushToken));assert.ok(!logs.join(' ').includes('activity-1'));
+});
+test('expiry and revocation discard remembered invalid-token material',async()=>{
+  const {revokeDevice}=await import('../revoke-device.js');const store=openStore(':memory:');const device='d'.repeat(32);
+  store.change(s=>{s.devices[device]={hash:'hash'};s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null,invalidTokenHash:'hash',tokenLostAt:T,expiresAt:T});});
+  const poll=createPoller({store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>{throw Error('must not send');}}});
+  await poll.tick();assert.equal(store.read().activities.a.invalidTokenHash,undefined);assert.equal(store.read().activities.a.tokenLostAt,undefined);
+  store.change(s=>s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null,invalidTokenHash:'hash',tokenLostAt:T}));
+  revokeDevice(store,device,{now:()=>T*1000,log:()=>{}});assert.equal(store.read().activities.a.invalidTokenHash,undefined);store.close();
+});
+
+test('projection traffic cannot indefinitely postpone urgent freshness heartbeat',async()=>{
+  const store=openStore(':memory:');let time=T,projection=100;const sent=[];
+  store.change(s=>s.activities.a=activity({id:'a',state:{yourScore:10,opponentScore:20,updatedAt:T}}));
+  const poll=createPoller({store,freshnessPriority:10,now:()=>time*1000,log:()=>{},sleeper:{...sleeper,matchups:async()=>({rows,updatedAt:time})},estimator:async()=>[{points:projection,kind:'estimate'},null],transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
+  await poll.tick();
+  for(let i=0;i<3;i++){time+=75;projection++;await poll.tick();}
+  assert.deepEqual(sent.map(m=>m.priority),[10,5,5,10]);assert.equal(sent.at(-1).cause,'heartbeat');store.close();
 });

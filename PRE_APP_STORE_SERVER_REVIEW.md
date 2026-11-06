@@ -100,3 +100,66 @@ Development dry-run checks now passed: public health, /data marker persistence, 
 - Production retention configuration, first snapshot/schedule, restore reconciliation, real APNs delivery and distribution signing remain open. No production change, PR merge, or policy publication was performed.
 
 References checked: https://docs.railway.com/volumes/backups and https://docs.railway.com/observability/logs . Railway currently documents daily/weekly/monthly snapshots with retention of 6/27/89 days respectively. Record the schedule actually selected and first successful snapshot instead of treating a recommendation as configuration evidence.
+
+
+## Changes — recoverable token loss reconciliation, November 6, 2026
+
+- Purpose: retain recoverability after an invalid APNs update token, preserve
+  expiry/caps/ownership, distinguish ending causes, and make refresh intentional.
+  Builds on local server commit 7dc36e9 and app commit 62469a9 on develop.
+- Files: app.js, poller.js, revoke-device.js, test/server.test.js, README.md,
+  and this ledger. App foreground/manual refresh scoping is in ContentView.swift.
+- Contract: `awaiting_token` is a new GET status; GET adds `needsPushToken`,
+  `endedReason`, `endedAt`, keeping existing fields. Same dead token/environment
+  PUT is 200/no-op; changed token/environment revives before original expiry.
+  Only explicit `refresh: true` clears backoff on unchanged-token PUT. No new
+  dependencies or schema migration; older JSON records lack optional fields safely.
+- Tests: **96 tests passed, zero failures**, using npm test under Node 24.22.2. Tests cover
+  no-op resend, environment/token replacement, late-response protection, expiry,
+  both caps, revocation, data deletion, no upstream work while waiting, ending
+  reasons, shortened log IDs, and next-tick refresh. Local app tests do not prove
+  behavior of the exact released binary.
+- Configuration/deploy needs: no new environment variables. Keep one server
+  instance and the persistent database. Server must deploy BEFORE the app build
+  that depends on the new contract. First use the development environment and
+  real APNs mode with the matching development bundle identity; dry-run is not
+  push-delivery verification. Do not merge/deploy as part of this local work.
+- Old-build risk: local app main source only PUTs/DELETEs activity registrations;
+  it neither calls the activity GET route nor decodes its status, and ignores
+  successful registration bodies. Exact approved/TestFlight build-source match,
+  live APNs delivery, locked-device recovery, Railway configuration/deployed
+  revision, and production verification: **unverified**.
+
+
+## Changes — delivery timing experiment, November 6, 2026
+
+- Purpose: test the observed mismatch between timely APNs acceptance and stale
+  locked-phone content. Existing device export confirms one development push with
+  payload time 15:15:21 arrived/applied at 15:16:49 (88 seconds later), with a new
+  stale deadline of 15:21:21. User reported warning cleared by 15:18 without opening
+  the app. This does not prove the cause of earlier missed/delayed updates.
+- Files: poller.js, config.js, server.js, app.js, revoke-device.js,
+  test/server.test.js, .env.example, README.md, this ledger. No app binary changes in this step.
+- Behavior: initial/recovery delivery uses priority 10. Optional development
+  APNS_FRESHNESS_PRIORITY=10 uses urgent freshness heartbeats, no more frequently
+  than 180 seconds between Apple-accepted urgent updates plus polling delay,
+  excluding score changes, explicit recovery and end events. Projection-only
+  traffic stays low between heartbeats. Default remains 5; production is untouched.
+  Six-minute stale policy and truthful upstream timestamps remain unchanged.
+- Diagnostics: redacted attempt/result metadata now identifies priority, message
+  time, content time, stale deadline and completion/duration. No tokens, full
+  activity IDs, device IDs or credentials. Invalid-token hashes/loss timestamps
+  are removed on terminal paths. No dependencies/schema migration.
+- Validation: npm test under Node 24.22.2 passed **101 tests, zero failures**. Covers urgent initial/manual recovery, default/opt-in priority policy, heartbeat spacing, projection traffic, timing-log redaction, and terminal invalid-token cleanup, alongside existing regression coverage.
+- Rollout needs: development service only; enable APNS_FRESHNESS_PRIORITY=10 with
+  live APNs and the Dev identity. One focused locked-phone test should compare
+  accepted push time, phone receipt and displayed updated time with permission
+  already granted. High-priority delivery consumes Apple's notification budget;
+  budget behavior and game-day traffic remain unverified. Do not deploy production
+  based on local tests or APNs 200 responses alone.
+- Real-device verification of THIS change, Railway deployment/configuration,
+  reduced warning frequency, released-app compatibility in practice, and
+  production verification: **unverified**. Nothing pushed, merged or deployed
+  by the agent as part of this step.
+- Apple references: https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns
+  and https://developer.apple.com/documentation/ActivityKit/starting-and-updating-live-activities-with-activitykit-push-notifications .
