@@ -122,7 +122,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=c
     res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:a.endReason??a.endedReason??null,needsPushToken:a.status==='awaiting_token',endedReason:a.endedReason??a.endReason??null,endedAt:a.endedAt??null});
   });
   app.delete('/v1/activities/:id',(req,res)=>{
-    store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endReason='user_delete';a.endedReason='user_delete';a.endedAt=seconds();a.token=null;a.version++;log(`event=ended activity=${a.id.slice(0,8)} reason=user_delete`);}});
+    store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endReason='user_delete';a.endedReason='user_delete';a.endedAt=seconds();a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;a.version++;log(`event=ended activity=${a.id.slice(0,8)} reason=user_delete`);}});
     res.status(204).end();
   });
   app.get('/v1/devices/me',(req,res)=>{

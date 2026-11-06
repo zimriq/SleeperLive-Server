@@ -5,8 +5,9 @@ export function changed(a,b) {
   return ['yourScore','opponentScore','yourProjectionKind','opponentProjectionKind'].some(k=>a[k]!==b[k]) ||
     ['yourProjected','opponentProjected'].some(k=>(a[k]===null)!==(b[k]===null) || (a[k]!==null && Math.abs(a[k]-b[k])>=0.5));
 }
-export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pushConcurrency=4,now=Date.now,log=console.warn}) {
+export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pushConcurrency=4,freshnessPriority=5,now=Date.now,log=console.warn}) {
   if(!Number.isInteger(pushConcurrency)||pushConcurrency<1||pushConcurrency>16)throw Error('Invalid push concurrency');
+  if(![5,10].includes(freshnessPriority))throw Error('Invalid freshness priority');
   let timer, running, stopped=true;
   const seconds=()=>Math.floor(now()/1000);
   const status={lastRunAt:null,lastError:null};
@@ -21,7 +22,9 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       const end=a.status==='ending';
       if(!end && !snap)return;
       if(!end && snap.state.updatedAt<a.state.updatedAt)return;
-      if(!end && !a.force && !changed(a.sentState,snap.state) && t-(a.sentAt??0)<180)return;
+      const freshnessBaseline=freshnessPriority===10?(a.urgentSentAt??a.sentAt??a.startedAt):(a.sentAt??a.startedAt);
+      const heartbeatDue=t-freshnessBaseline>=180;
+      if(!end && !a.force && !changed(a.sentState,snap.state) && !heartbeatDue)return;
       // Reserve an ordering timestamp durably BEFORE sending, including across restart/retry.
       if((a.pushTimestamp??0)>=t)return;
       a.pushTimestamp=t; version=a.version;
@@ -29,10 +32,14 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       // A failed delivery must not advance this baseline. Corrections count too.
       const baseline=a.sentState??a.state;
       const scoreChanged=!end && (baseline.yourScore!==snap.state.yourScore || baseline.opponentScore!==snap.state.opponentScore);
+      const recovery=a.force || !a.sentState;
       message={token:a.token,env:a.env,event:end?'end':'update',timestamp:t,
-        priority:end||scoreChanged?10:5,state:end?a.state:snap.state};
+        priority:end||scoreChanged||recovery?10:heartbeatDue?freshnessPriority:5,
+        cause:end?'end':scoreChanged?'score':recovery?'recovery':heartbeatDue?'heartbeat':'projection',state:end?a.state:snap.state};
     });
     if(!message)return;
+    const attemptAt=seconds();
+    log(`event=push_attempt activity=${id.slice(0,8)} reason=${message.cause} priority=${message.priority} timestamp=${message.timestamp} updatedAt=${message.state.updatedAt} staleAt=${message.event==='end'?'none':message.state.updatedAt+360}`);
     let result;
     try{result=await transport.send(message);}catch{result={kind:'retry',reason:'TransportError'};}
     store.change(s=>{
@@ -47,22 +54,23 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       if(result.kind==='dead' || (result.kind==='ok' && message.event==='end')) {
         a.endedReason=a.endedReason??(result.kind==='dead'?'apns_unregistered':'end_push_accepted');a.endReason=a.endedReason;
         log(`event=ended activity=${id.slice(0,8)} reason=${a.endedReason}`);
-        a.status='ended';a.endedAt=seconds();a.token=null;return;
+        a.status='ended';a.endedAt=seconds();a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;return;
       }
       if(result.kind==='ok'){
-        a.state=message.state;a.sentState=message.state;a.sentAt=seconds();a.force=false;a.failures=0;a.nextAttempt=0;
+        a.state=message.state;a.sentState=message.state;a.sentAt=seconds();
+        if(message.priority===10)a.urgentSentAt=seconds();a.force=false;a.failures=0;a.nextAttempt=0;
       }else{
         a.failures=(a.failures??0)+1;a.nextAttempt=seconds()+backoff(a.failures);
-        if(message.event==='end' && a.failures>=6){a.status='ended';a.endedReason='end_push_failed';a.endReason=a.endedReason;log(`event=ended activity=${id.slice(0,8)} reason=end_push_failed`);a.endedAt=seconds();a.token=null;}
+        if(message.event==='end' && a.failures>=6){a.status='ended';a.endedReason='end_push_failed';a.endReason=a.endedReason;log(`event=ended activity=${id.slice(0,8)} reason=end_push_failed`);a.endedAt=seconds();a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;}
       }
     });
-    if(result.kind!=='dead')log(`event=push_result activity=${id.slice(0,8)} reason=${result.reason??result.kind} status=${result.status??''}`);
+    if(result.kind!=='dead')log(`event=push_result activity=${id.slice(0,8)} reason=${result.reason??result.kind} status=${result.status??''} priority=${message.priority} timestamp=${message.timestamp} updatedAt=${message.state.updatedAt} completedAt=${seconds()} durationSeconds=${seconds()-attemptAt}`);
     if(result.kind==='retry')log('APNs retry needed',result.status??'',result.reason??'');
   }
   async function run(){
     store.change(s=>{
       for(const [id,a] of Object.entries(s.activities)){
-        if(['active','ending','awaiting_token'].includes(a.status) && !a.token && a.expiresAt<=seconds()){a.status='ended';a.endedAt=seconds();a.endedReason='expired';a.endReason='expired';log(`event=ended activity=${id.slice(0,8)} reason=expired`);}
+        if(['active','ending','awaiting_token'].includes(a.status) && !a.token && a.expiresAt<=seconds()){a.status='ended';a.endedAt=seconds();a.endedReason='expired';a.endReason='expired';delete a.invalidTokenHash;delete a.tokenLostAt;log(`event=ended activity=${id.slice(0,8)} reason=expired`);}
         if(a.status==='active' && a.expiresAt<=seconds()){a.status='ending';a.endedReason='expired';a.endReason='expired';}
         if(a.status==='ended' && seconds()-a.endedAt>86400)delete s.activities[id];
       }

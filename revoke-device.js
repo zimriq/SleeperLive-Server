@@ -14,7 +14,7 @@ export function revokeDevice(store, deviceId, {now=Date.now,log=console.warn}={}
       if(activity.deviceId!==deviceId)continue;
       if(activity.status==='awaiting_token'){
         activity.status='ended';activity.endedReason='device_revoked';activity.endReason='device_revoked';
-        activity.endedAt=Math.floor(now()/1000);activity.token=null;activity.version++;
+        activity.endedAt=Math.floor(now()/1000);activity.token=null;delete activity.invalidTokenHash;delete activity.tokenLostAt;activity.version++;
         log(`event=ended activity=${id.slice(0,8)} reason=device_revoked`);
       }
       if(activity.status==='active'){

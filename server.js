@@ -10,7 +10,7 @@ import { createApp } from './app.js';
 process.umask(0o077);
 const cfg=config(),store=openStore(cfg.db),sleeper=createSleeper();
 const estimator=cfg.projections?createEstimator():undefined,transport=createAPNs(cfg);
-const poller=createPoller({store,sleeper,transport,estimator,pollMs:cfg.pollMs,pushConcurrency:cfg.pushConcurrency});
+const poller=createPoller({store,sleeper,transport,estimator,pollMs:cfg.pollMs,pushConcurrency:cfg.pushConcurrency,freshnessPriority:cfg.freshnessPriority});
 const app=createApp({cfg,store,sleeper,estimator,poller});
 const server=createHTTPServer(app).listen(cfg.port,()=>{console.log(`SleeperLive listening on ${cfg.port}; APNs ${cfg.mode}`);poller.start();});
 let stopping=false;

@@ -192,7 +192,7 @@ test('SIGKILL leaves committed SQLite registration recoverable',async()=>{
 });
 
 
-test('score changes are urgent; initial unchanged snapshot, projections, and heartbeats are not',async()=>{
+test('score changes and initial recovery are urgent; projections and default heartbeats are not',async()=>{
   let time=T, yours=10, opponent=20, projection=100;
   const store=openStore(':memory:');
   const initial={yourScore:10,opponentScore:20,yourProjected:100,opponentProjected:110,
@@ -204,7 +204,7 @@ test('score changes are urgent; initial unchanged snapshot, projections, and hea
     estimator:async()=>[{points:projection,kind:'estimate'},{points:110,kind:'estimate'}],
     transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
   try {
-    await poll.tick();assert.equal(pushPriority(sent.at(-1)),'5');
+    await poll.tick();assert.equal(pushPriority(sent.at(-1)),'10');
     time+=75;await poll.tick();assert.equal(sent.length,1);
     time+=75;yours=10.1;await poll.tick();assert.equal(pushPriority(sent.at(-1)),'10');
     time+=75;opponent=20.1;await poll.tick();assert.equal(pushPriority(sent.at(-1)),'10');
@@ -670,7 +670,7 @@ test('dead token resend is a no-op and GET exposes recoverable state',async t=>{
   assert.deepEqual(f.store.read().activities['activity-1'],before);
   const view=await (await f.call('/v1/activities/activity-1','GET',undefined,f.token)).json();
   assert.equal(view.needsPushToken,true);assert.equal(view.endedReason,null);assert.equal(view.endedAt,null);
-  assert.equal(logs.length,1);assert.match(logs[0],/^event=token_lost activity=activity reason=Unregistered/);
+  assert.equal(logs.filter(v=>v.startsWith('event=token_lost')).length,1);assert.match(logs.find(v=>v.startsWith('event=token_lost')),/^event=token_lost activity=activity reason=Unregistered/);
   assert.ok(!logs.join(' ').includes('activity-1'));assert.ok(!logs.join(' ').includes(registration.pushToken));
   assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,apnsEnvironment:'production'},f.token)).status,200);
   assert.equal(f.store.read().activities['activity-1'].status,'active');
@@ -729,4 +729,52 @@ test('explicit refresh sends on next tick while ordinary retries preserve backof
   await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token);
   let sends=0;const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>{sends++;return {kind:'ok'};}}});
   await poll.tick();assert.equal(sends,1);
+});
+
+
+test('urgent freshness mode keeps projection-only pushes low and limits unchanged heartbeats',async()=>{
+  const store=openStore(':memory:');let time=T,projection=100;const sent=[];
+  const initial={yourScore:10,opponentScore:20,yourProjected:100,opponentProjected:110,yourProjectionKind:'estimate',opponentProjectionKind:'estimate',updatedAt:T};
+  store.change(s=>s.activities.a=activity({id:'a',state:initial}));
+  const poll=createPoller({store,freshnessPriority:10,now:()=>time*1000,log:()=>{},
+    sleeper:{...sleeper,matchups:async()=>({rows,updatedAt:time})},
+    estimator:async()=>[{points:projection,kind:'estimate'},{points:110,kind:'estimate'}],
+    transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
+  await poll.tick();assert.equal(sent.at(-1).priority,10);
+  time+=75;projection=95;await poll.tick();assert.equal(sent.at(-1).priority,5);
+  const before=sent.length;time+=75;await poll.tick();assert.equal(sent.length,before);
+  time+=150;await poll.tick();assert.equal(sent.at(-1).priority,10);assert.equal(sent.at(-1).cause,'heartbeat');
+  time+=75;await poll.tick();assert.equal(sent.length,before+1);store.close();
+});
+test('priority setting is opt-in and rejects unsupported values',()=>{
+  assert.equal(config({INVITE_CODE:cfg.invite}).freshnessPriority,5);
+  assert.equal(config({INVITE_CODE:cfg.invite,APNS_FRESHNESS_PRIORITY:'10'}).freshnessPriority,10);
+  for(const value of ['6','0','true',''])assert.throws(()=>config({INVITE_CODE:cfg.invite,APNS_FRESHNESS_PRIORITY:value}));
+  const store=openStore(':memory:');assert.throws(()=>createPoller({store,freshnessPriority:6}));store.close();
+});
+test('unchanged user refresh is urgent and logs payload timing without tokens',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  let time=T;const sent=[],logs=[];
+  const poll=createPoller({store:f.store,sleeper,now:()=>time*1000,log:v=>logs.push(v),transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
+  await poll.tick();await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token);
+  time+=75;await poll.tick();assert.equal(sent.at(-1).priority,10);assert.equal(sent.at(-1).cause,'recovery');
+  assert.ok(logs.some(v=>v.includes('priority=10')&&v.includes('staleAt=')));
+  assert.ok(!logs.join(' ').includes(registration.pushToken));assert.ok(!logs.join(' ').includes('activity-1'));
+});
+test('expiry and revocation discard remembered invalid-token material',async()=>{
+  const {revokeDevice}=await import('../revoke-device.js');const store=openStore(':memory:');const device='d'.repeat(32);
+  store.change(s=>{s.devices[device]={hash:'hash'};s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null,invalidTokenHash:'hash',tokenLostAt:T,expiresAt:T});});
+  const poll=createPoller({store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>{throw Error('must not send');}}});
+  await poll.tick();assert.equal(store.read().activities.a.invalidTokenHash,undefined);assert.equal(store.read().activities.a.tokenLostAt,undefined);
+  store.change(s=>s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null,invalidTokenHash:'hash',tokenLostAt:T}));
+  revokeDevice(store,device,{now:()=>T*1000,log:()=>{}});assert.equal(store.read().activities.a.invalidTokenHash,undefined);store.close();
+});
+
+test('projection traffic cannot indefinitely postpone urgent freshness heartbeat',async()=>{
+  const store=openStore(':memory:');let time=T,projection=100;const sent=[];
+  store.change(s=>s.activities.a=activity({id:'a',state:{yourScore:10,opponentScore:20,updatedAt:T}}));
+  const poll=createPoller({store,freshnessPriority:10,now:()=>time*1000,log:()=>{},sleeper:{...sleeper,matchups:async()=>({rows,updatedAt:time})},estimator:async()=>[{points:projection,kind:'estimate'},null],transport:{send:async m=>{sent.push(m);return {kind:'ok'};}}});
+  await poll.tick();
+  for(let i=0;i<3;i++){time+=75;projection++;await poll.tick();}
+  assert.deepEqual(sent.map(m=>m.priority),[10,5,5,10]);assert.equal(sent.at(-1).cause,'heartbeat');store.close();
 });

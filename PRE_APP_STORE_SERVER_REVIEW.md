@@ -129,3 +129,37 @@ References checked: https://docs.railway.com/volumes/backups and https://docs.ra
   successful registration bodies. Exact approved/TestFlight build-source match,
   live APNs delivery, locked-device recovery, Railway configuration/deployed
   revision, and production verification: **unverified**.
+
+
+## Changes — delivery timing experiment, November 6, 2026
+
+- Purpose: test the observed mismatch between timely APNs acceptance and stale
+  locked-phone content. Existing device export confirms one development push with
+  payload time 15:15:21 arrived/applied at 15:16:49 (88 seconds later), with a new
+  stale deadline of 15:21:21. User reported warning cleared by 15:18 without opening
+  the app. This does not prove the cause of earlier missed/delayed updates.
+- Files: poller.js, config.js, server.js, app.js, revoke-device.js,
+  test/server.test.js, .env.example, README.md, this ledger. No app binary changes in this step.
+- Behavior: initial/recovery delivery uses priority 10. Optional development
+  APNS_FRESHNESS_PRIORITY=10 uses urgent freshness heartbeats, no more frequently
+  than 180 seconds between Apple-accepted urgent updates plus polling delay,
+  excluding score changes, explicit recovery and end events. Projection-only
+  traffic stays low between heartbeats. Default remains 5; production is untouched.
+  Six-minute stale policy and truthful upstream timestamps remain unchanged.
+- Diagnostics: redacted attempt/result metadata now identifies priority, message
+  time, content time, stale deadline and completion/duration. No tokens, full
+  activity IDs, device IDs or credentials. Invalid-token hashes/loss timestamps
+  are removed on terminal paths. No dependencies/schema migration.
+- Validation: npm test under Node 24.22.2 passed **101 tests, zero failures**. Covers urgent initial/manual recovery, default/opt-in priority policy, heartbeat spacing, projection traffic, timing-log redaction, and terminal invalid-token cleanup, alongside existing regression coverage.
+- Rollout needs: development service only; enable APNS_FRESHNESS_PRIORITY=10 with
+  live APNs and the Dev identity. One focused locked-phone test should compare
+  accepted push time, phone receipt and displayed updated time with permission
+  already granted. High-priority delivery consumes Apple's notification budget;
+  budget behavior and game-day traffic remain unverified. Do not deploy production
+  based on local tests or APNs 200 responses alone.
+- Real-device verification of THIS change, Railway deployment/configuration,
+  reduced warning frequency, released-app compatibility in practice, and
+  production verification: **unverified**. Nothing pushed, merged or deployed
+  by the agent as part of this step.
+- Apple references: https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns
+  and https://developer.apple.com/documentation/ActivityKit/starting-and-updating-live-activities-with-activitykit-push-notifications .
