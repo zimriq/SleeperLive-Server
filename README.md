@@ -101,7 +101,7 @@ outgrows its limit, inspect its size and adjust deliberately.
   scores use priority 5; end pushes use 10. No alerts/sounds. Failed sends do not
   advance the accepted-score baseline. iOS delivery budgets still apply.
 - APNs 410 Unregistered or ExpiredToken clears the invalid token and pauses the
-  activity in `awaiting_token`. Only a different token can resume the same activity,
+  activity in `awaiting_token`. A different token or environment can resume the same activity,
   before its original eight-hour expiry. Waiting registrations still count toward
   activity limits; deletion and expiry cannot be revived. A hash of the invalid
   token prevents reusing it without retaining the token itself.
@@ -519,3 +519,32 @@ production database deletion is performed by this change. Do not claim complete 
 from all systems or a retention deadline until those operational details are settled.
 A lost successful HTTP response can leave the client unable to confirm deletion: it
 must not interpret a later 401 (which might also mean revocation) as proof of erasure.
+
+
+### Recovery contract (develop, November 6, 2026)
+
+`awaiting_token` registrations are paused, not ended. They do not fetch Sleeper
+or send pushes, still occupy device/global capacity, and expire at their original
+deadline. Re-uploading the same invalid token/environment returns 200 with
+`needsPushToken: true`, without changing the record. A different token or environment
+revives delivery. Duplicate uploads do not clear backoff; only `refresh: true`
+from an intentional user/foreground refresh requests that reset.
+
+GET `/v1/activities/:id` retains all prior fields and adds `needsPushToken`,
+`endedReason`, and `endedAt` (Unix seconds or null). Existing owned ended/expired
+registrations return 409 `activity_ended` before start-age validation; invalid
+start times for new registrations remain 400. Reasons are `expired`, `user_delete`,
+`device_revoked`, `device_data_deleted`, `apns_unregistered`, `end_push_accepted`,
+and `end_push_failed`. Data deletion removes the record, so its reason survives
+only in the sanitized event log. `endReason` remains as a compatibility alias.
+
+Events use `event=<name> activity=<first 8 characters> reason=<value>`; token-loss
+and push-result events can include APNs status. No push token, bearer credential,
+full activity ID, or device ID is emitted by these application events. Railway's
+incoming HTTP access logs are separate and may contain full URL paths.
+
+Deploy the server before an app build that depends on this recovery contract.
+The app main source checked locally does not GET/decode activity status; registration
+accepts any 2xx and ignores the response body. Exact approved/TestFlight binary
+provenance and physical-device compatibility still require verification. Dry-run
+cannot verify actual APNs delivery, token rotation, or locked-phone recovery.

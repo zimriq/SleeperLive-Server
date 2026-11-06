@@ -3,15 +3,22 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openStore } from './registrations.js';
 
-export function revokeDevice(store, deviceId) {
+export function revokeDevice(store, deviceId, {now=Date.now,log=console.warn}={}) {
   if(!/^[a-f0-9]{32}$/.test(deviceId))throw Error('Invalid device ID');
   return store.change(state=>{
     const device=state.devices[deviceId];
     if(!device)return {found:false,activitiesQueued:0};
     device.revoked=true;
     let activitiesQueued=0;
-    for(const activity of Object.values(state.activities)){
-      if(activity.deviceId===deviceId&&activity.status==='active'){
+    for(const [id,activity] of Object.entries(state.activities)){
+      if(activity.deviceId!==deviceId)continue;
+      if(activity.status==='awaiting_token'){
+        activity.status='ended';activity.endedReason='device_revoked';activity.endReason='device_revoked';
+        activity.endedAt=Math.floor(now()/1000);activity.token=null;activity.version++;
+        log(`event=ended activity=${id.slice(0,8)} reason=device_revoked`);
+      }
+      if(activity.status==='active'){
+        activity.endedReason='device_revoked';activity.endReason='device_revoked';
         activity.status='ending';activity.version++;activity.nextAttempt=0;
         activitiesQueued++;
       }

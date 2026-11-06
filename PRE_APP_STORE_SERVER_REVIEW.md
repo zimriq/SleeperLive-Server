@@ -100,3 +100,32 @@ Development dry-run checks now passed: public health, /data marker persistence, 
 - Production retention configuration, first snapshot/schedule, restore reconciliation, real APNs delivery and distribution signing remain open. No production change, PR merge, or policy publication was performed.
 
 References checked: https://docs.railway.com/volumes/backups and https://docs.railway.com/observability/logs . Railway currently documents daily/weekly/monthly snapshots with retention of 6/27/89 days respectively. Record the schedule actually selected and first successful snapshot instead of treating a recommendation as configuration evidence.
+
+
+## Changes — recoverable token loss reconciliation, November 6, 2026
+
+- Purpose: retain recoverability after an invalid APNs update token, preserve
+  expiry/caps/ownership, distinguish ending causes, and make refresh intentional.
+  Builds on local server commit 7dc36e9 and app commit 62469a9 on develop.
+- Files: app.js, poller.js, revoke-device.js, test/server.test.js, README.md,
+  and this ledger. App foreground/manual refresh scoping is in ContentView.swift.
+- Contract: `awaiting_token` is a new GET status; GET adds `needsPushToken`,
+  `endedReason`, `endedAt`, keeping existing fields. Same dead token/environment
+  PUT is 200/no-op; changed token/environment revives before original expiry.
+  Only explicit `refresh: true` clears backoff on unchanged-token PUT. No new
+  dependencies or schema migration; older JSON records lack optional fields safely.
+- Tests: **96 tests passed, zero failures**, using npm test under Node 24.22.2. Tests cover
+  no-op resend, environment/token replacement, late-response protection, expiry,
+  both caps, revocation, data deletion, no upstream work while waiting, ending
+  reasons, shortened log IDs, and next-tick refresh. Local app tests do not prove
+  behavior of the exact released binary.
+- Configuration/deploy needs: no new environment variables. Keep one server
+  instance and the persistent database. Server must deploy BEFORE the app build
+  that depends on the new contract. First use the development environment and
+  real APNs mode with the matching development bundle identity; dry-run is not
+  push-delivery verification. Do not merge/deploy as part of this local work.
+- Old-build risk: local app main source only PUTs/DELETEs activity registrations;
+  it neither calls the activity GET route nor decodes its status, and ignores
+  successful registration bodies. Exact approved/TestFlight build-source match,
+  live APNs delivery, locked-device recovery, Railway configuration/deployed
+  revision, and production verification: **unverified**.

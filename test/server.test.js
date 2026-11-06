@@ -107,10 +107,10 @@ test('expired APNs token waits for replacement without retrying invalid destinat
     await poll.tick();
     const state=store.read();
     assert.equal(state.activities.a.status,'awaiting_token');assert.equal(state.activities.a.token,null);
-    assert.equal(state.activities.a.endReason,'token_invalid');assert.equal(state.devices.d.hash,'retained-device-hash');
+    assert.equal(state.activities.a.endedReason,undefined);assert.equal(state.devices.d.hash,'retained-device-hash');
     for(const delay of [75,150,300,900]){time+=delay;await poll.tick();}
     assert.equal(sends,1,'permanently expired token must never be retried');
-    assert.ok(logs.some(entry=>entry[0]==='Activity push result'));
+    assert.ok(logs.some(entry=>entry[0].startsWith('event=token_lost ')));
     assert.ok(!logs.some(entry=>entry[0]==='APNs retry needed'));
   }finally{store.close();}
 });
@@ -615,8 +615,8 @@ test('invalid token requires a different token; replacement resumes delivery and
   const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>({kind:'dead',status:410,reason:'Unregistered'})}});
   await poll.tick();
   assert.equal(f.store.read().activities['activity-1'].status,'awaiting_token');
-  assert.equal((await f.call('/v1/activities/activity-1','PUT',registration,f.token)).status,409);
-  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,pushToken:registration.pushToken.toUpperCase()},f.token)).status,409);
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',registration,f.token)).status,200);
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,pushToken:registration.pushToken.toUpperCase()},f.token)).status,200);
   const replacement={...registration,pushToken:'bb'.repeat(32)};
   assert.equal((await f.call('/v1/activities/activity-1','PUT',replacement,f.token)).status,200);
   let sent;
@@ -658,4 +658,75 @@ test('waiting activities retain ownership and capacity restrictions',async t=>{
   assert.equal((await f.call('/v1/activities/activity-2','PUT',registration,f.token)).status,429);
   const other=await (await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
   assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,pushToken:'bb'.repeat(32)},other.deviceToken)).status,404);
+});
+
+
+test('dead token resend is a no-op and GET exposes recoverable state',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  const logs=[];
+  const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:(...v)=>logs.push(v.join(' ')),transport:{send:async()=>({kind:'dead',status:410,reason:'Unregistered'})}});
+  await poll.tick();const before=f.store.read().activities['activity-1'];
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token)).status,200);
+  assert.deepEqual(f.store.read().activities['activity-1'],before);
+  const view=await (await f.call('/v1/activities/activity-1','GET',undefined,f.token)).json();
+  assert.equal(view.needsPushToken,true);assert.equal(view.endedReason,null);assert.equal(view.endedAt,null);
+  assert.equal(logs.length,1);assert.match(logs[0],/^event=token_lost activity=activity reason=Unregistered/);
+  assert.ok(!logs.join(' ').includes('activity-1'));assert.ok(!logs.join(' ').includes(registration.pushToken));
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...registration,apnsEnvironment:'production'},f.token)).status,200);
+  assert.equal(f.store.read().activities['activity-1'].status,'active');
+});
+test('existing expired or ended registration returns 409 before start-age checks; new invalid start returns 400',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  f.store.change(s=>{s.activities['activity-1'].expiresAt=T;});
+  const expired={...registration,startedAt:T-28800};
+  const res=await f.call('/v1/activities/activity-1','PUT',expired,f.token);
+  assert.equal(res.status,409);assert.equal((await res.json()).error,'activity_ended');
+  f.store.change(s=>{s.activities['activity-1'].status='ended';});
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',expired,f.token)).status,409);
+  assert.equal((await f.call('/v1/activities/activity-2','PUT',expired,f.token)).status,400);
+  assert.equal((await f.call('/v1/activities/activity-1','PUT',{...expired,startedAt:'bad'},f.token)).status,400);
+});
+test('waiting activity does not fetch or send; expiration and revocation have reasons',async()=>{
+  const {revokeDevice}=await import('../revoke-device.js');
+  const store=openStore(':memory:');const device='d'.repeat(32);let time=T,fetches=0,sends=0;
+  store.change(s=>{s.devices[device]={hash:'hash'};s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null,expiresAt:T+10});});
+  const poll=createPoller({store,now:()=>time*1000,log:()=>{},sleeper:{matchups:async()=>{fetches++;},meta:async()=>{fetches++;}},transport:{send:async()=>{sends++;}}});
+  await poll.tick();assert.equal(fetches,0);assert.equal(sends,0);
+  time+=10;await poll.tick();assert.equal(store.read().activities.a.endedReason,'expired');assert.equal(sends,0);
+  store.change(s=>{s.activities.a=activity({id:'a',deviceId:device,status:'awaiting_token',token:null});});
+  revokeDevice(store,device,{now:()=>time*1000,log:()=>{}});
+  assert.equal(store.read().activities.a.status,'ended');assert.equal(store.read().activities.a.endedReason,'device_revoked');store.close();
+});
+test('waiting activity counts toward global cap and is removed by device-data deletion',async t=>{
+  const logs=[];const f=await fixture(t,{cfg:{maxActivities:1},log:(...v)=>logs.push(v.join(' '))});
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  f.store.change(s=>{s.activities['activity-1'].status='awaiting_token';s.activities['activity-1'].token=null;});
+  const other=await (await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  assert.equal((await f.call('/v1/activities/activity-2','PUT',registration,other.deviceToken)).status,429);
+  assert.equal((await f.call('/v1/devices/me/data','DELETE',undefined,f.token)).status,204);
+  assert.equal(f.store.read().activities['activity-1'],undefined);
+  assert.ok(logs.some(v=>v.includes('reason=device_data_deleted')));
+  assert.ok(!logs.join(' ').includes('activity-1'));
+});
+test('end push outcomes and user deletion expose distinct ended reasons',async t=>{
+  for(const [result,reason] of [[{kind:'dead',status:410,reason:'Unregistered'},'apns_unregistered'],[{kind:'ok'},'end_push_accepted'],[{kind:'retry'},'end_push_failed']]){
+    const store=openStore(':memory:');store.change(s=>s.activities.a=activity({id:'a',status:'ending',failures:5}));
+    const poll=createPoller({store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>result}});
+    await poll.tick();assert.equal(store.read().activities.a.status,'ended');assert.equal(store.read().activities.a.endedReason,reason);store.close();
+  }
+  const logs=[];const f=await fixture(t,{log:(...v)=>logs.push(v.join(' '))});
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  await f.call('/v1/activities/activity-1','DELETE',undefined,f.token);
+  const view=await (await f.call('/v1/activities/activity-1','GET',undefined,f.token)).json();
+  assert.equal(view.endedReason,'user_delete');assert.equal(view.endedAt,T);assert.equal(view.needsPushToken,false);
+  assert.ok(!logs.join(' ').includes('activity-1'));
+});
+test('explicit refresh sends on next tick while ordinary retries preserve backoff',async t=>{
+  const f=await fixture(t);await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  f.store.change(s=>{s.activities['activity-1'].nextAttempt=T+900;});
+  await f.call('/v1/activities/activity-1','PUT',registration,f.token);
+  assert.equal(f.store.read().activities['activity-1'].nextAttempt,T+900);
+  await f.call('/v1/activities/activity-1','PUT',{...registration,refresh:true},f.token);
+  let sends=0;const poll=createPoller({store:f.store,sleeper,now:()=>T*1000,log:()=>{},transport:{send:async()=>{sends++;return {kind:'ok'};}}});
+  await poll.tick();assert.equal(sends,1);
 });

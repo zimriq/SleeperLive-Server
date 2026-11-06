@@ -17,7 +17,7 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       const a=s.activities[id], t=seconds();
       if(!a || a.status==='ended' || a.nextAttempt>t)return;
       if(a.expiresAt<=t)a.status='ending';
-      if(a.status==='awaiting_token')return;
+      if(a.status==='awaiting_token' || !a.token)return;
       const end=a.status==='ending';
       if(!end && !snap)return;
       if(!end && snap.state.updatedAt<a.state.updatedAt)return;
@@ -41,34 +41,35 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       if(!a || a.version!==version || a.status==='ended')return;
       if(result.kind==='dead' && message.event!=='end'){
         a.status='awaiting_token';a.invalidTokenHash=createHash('sha256').update(a.token.toLowerCase()).digest('hex');
-        a.token=null;a.endReason='token_invalid';a.nextAttempt=0;return;
+        a.token=null;delete a.endReason;delete a.endedReason;a.tokenLostAt=seconds();a.nextAttempt=0;
+        log(`event=token_lost activity=${id.slice(0,8)} reason=${result.reason??'unknown'} status=${result.status??''}`);return;
       }
       if(result.kind==='dead' || (result.kind==='ok' && message.event==='end')) {
-        a.endReason=a.endReason??'end_delivered';
+        a.endedReason=a.endedReason??(result.kind==='dead'?'apns_unregistered':'end_push_accepted');a.endReason=a.endedReason;
+        log(`event=ended activity=${id.slice(0,8)} reason=${a.endedReason}`);
         a.status='ended';a.endedAt=seconds();a.token=null;return;
       }
       if(result.kind==='ok'){
         a.state=message.state;a.sentState=message.state;a.sentAt=seconds();a.force=false;a.failures=0;a.nextAttempt=0;
       }else{
         a.failures=(a.failures??0)+1;a.nextAttempt=seconds()+backoff(a.failures);
-        if(message.event==='end' && a.failures>=6){a.status='ended';a.endReason='end_delivery_failed';a.endedAt=seconds();a.token=null;}
+        if(message.event==='end' && a.failures>=6){a.status='ended';a.endedReason='end_push_failed';a.endReason=a.endedReason;log(`event=ended activity=${id.slice(0,8)} reason=end_push_failed`);a.endedAt=seconds();a.token=null;}
       }
     });
-    const current=store.read().activities[id];
-    log('Activity push result',JSON.stringify({activityId:id,event:message.event,kind:result.kind,status:result.status,reason:result.reason,timestamp:message.timestamp,activityStatus:current?.status,endReason:current?.endReason,failures:current?.failures,nextAttempt:current?.nextAttempt}));
+    if(result.kind!=='dead')log(`event=push_result activity=${id.slice(0,8)} reason=${result.reason??result.kind} status=${result.status??''}`);
     if(result.kind==='retry')log('APNs retry needed',result.status??'',result.reason??'');
   }
   async function run(){
     store.change(s=>{
       for(const [id,a] of Object.entries(s.activities)){
-        if(a.status==='awaiting_token' && a.expiresAt<=seconds()){a.status='ended';a.endedAt=seconds();a.endReason='expired';log('Activity ended',id,'expired');}
-        if(a.status==='active' && a.expiresAt<=seconds()){a.status='ending';a.endReason='expired';}
+        if(['active','ending','awaiting_token'].includes(a.status) && !a.token && a.expiresAt<=seconds()){a.status='ended';a.endedAt=seconds();a.endedReason='expired';a.endReason='expired';log(`event=ended activity=${id.slice(0,8)} reason=expired`);}
+        if(a.status==='active' && a.expiresAt<=seconds()){a.status='ending';a.endedReason='expired';a.endReason='expired';}
         if(a.status==='ended' && seconds()-a.endedAt>86400)delete s.activities[id];
       }
     });
     const groups=new Map(), jobs=[];
     for(const a of Object.values(store.read().activities)){
-      if(['ended','awaiting_token'].includes(a.status) || a.nextAttempt>seconds())continue;
+      if(['ended','awaiting_token'].includes(a.status) || !a.token || a.nextAttempt>seconds())continue;
       if(a.status==='ending'){jobs.push(()=>deliver(a.id));continue;}
       const key=`${a.leagueId}:${a.week}`;
       if(!groups.has(key)){
