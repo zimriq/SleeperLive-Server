@@ -100,10 +100,18 @@ outgrows its limit, inspect its size and adjust deliberately.
   Unchanged-score heartbeats, projection-only changes, and initial sync with unchanged
   scores use priority 5; end pushes use 10. No alerts/sounds. Failed sends do not
   advance the accepted-score baseline. iOS delivery budgets still apply.
-- APNs 410 Unregistered or ExpiredToken ends that token's activity and clears its
-  push token. A late response for a replaced token cannot end its replacement.
-  Other failures back off up to 15
-  minutes; inspect server logs for configuration failures. Rotation resets backoff.
+- APNs 410 Unregistered or ExpiredToken clears the invalid token and pauses the
+  activity in `awaiting_token`. Only a different token can resume the same activity,
+  before its original eight-hour expiry. Waiting registrations still count toward
+  activity limits; deletion and expiry cannot be revived. A hash of the invalid
+  token prevents reusing it without retaining the token itself.
+- Other push failures back off up to 15 minutes. Token rotation or an authenticated
+  registration with `refresh: true` resets backoff and queues fresh delivery on
+  the next poll. Ordinary registration retries remain idempotent. Late responses
+  cannot override a replacement token or explicit refresh.
+- Registration and push-result logs identify activities, status/reason, retry time,
+  and failures without printing credentials or push tokens. Apple acceptance is
+  not confirmation that the phone displayed the update.
 - End locally in the app, then DELETE the registration. Server also expires it eight
   hours after its actual start. A Sunday activity must be restarted for Monday.
 - No automatic game-final ending yet. Final scores may receive heartbeat pushes

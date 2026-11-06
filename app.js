@@ -8,7 +8,7 @@ import { snapshot } from './sleeper.js';
 const hash = text=>createHash('sha256').update(text).digest('hex');
 const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(b),'hex'));
 const fail=(status,error)=>Object.assign(new Error(error),{status});
-export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
+export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=console.info}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
   app.disable('x-powered-by');app.set('trust proxy',false);
   // Verify fixed-size bearer credentials using the committed, bounded memory index.
@@ -80,7 +80,8 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     // Validate access before doing upstream work, then recheck after await inside the transaction.
     const check=a=>{
       if(a.deviceId!==req.deviceId)throw fail(404,'not_found');
-      if(a.status!=='active'||a.expiresAt<=seconds())throw fail(409,'activity_ended');
+      if(!['active','awaiting_token'].includes(a.status)||a.expiresAt<=seconds())throw fail(409,'activity_ended');
+      if(a.status==='awaiting_token' && a.invalidTokenHash===hash(b.pushToken.toLowerCase()))throw fail(409,'push_token_invalid');
       if(a.leagueId!==p.leagueId||a.week!==p.week||a.rosterId!==p.rosterId||a.startedAt!==b.startedAt)throw fail(409,'identity_mismatch');
     };
     const existing=store.read().activities[id];if(existing)check(existing);
@@ -88,7 +89,18 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
     const result=store.change(s=>{
       if(!s.devices[req.deviceId]||s.devices[req.deviceId].revoked)throw fail(401,'unauthorized');
       const a=s.activities[id];
-      if(a){check(a);if(a.token!==b.pushToken||a.env!==b.apnsEnvironment){a.token=b.pushToken;a.env=b.apnsEnvironment;a.version++;a.force=true;a.nextAttempt=0;a.failures=0;}return {created:false,expiresAt:a.expiresAt};}
+      if(a){
+        check(a);
+        // Ordinary retries remain idempotent. An explicit refresh supersedes any
+        // in-flight delivery so a late response cannot restore the old backoff.
+        const reset=a.token!==b.pushToken||a.env!==b.apnsEnvironment||b.refresh===true;
+        if(reset){
+          a.token=b.pushToken;a.env=b.apnsEnvironment;a.status='active';
+          delete a.invalidTokenHash;delete a.endReason;
+          a.version++;a.force=true;a.nextAttempt=0;a.failures=0;
+        }
+        return {created:false,expiresAt:a.expiresAt};
+      }
       const active=Object.values(s.activities).filter(a=>a.status!=='ended'&&a.expiresAt>seconds());
       if(active.length>=cfg.maxActivities||active.filter(a=>a.deviceId===req.deviceId).length>=cfg.perDevice)throw fail(429,'activity_limit');
       const expiresAt=b.startedAt+28800;
@@ -98,14 +110,15 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller}) {
         force:true,failures:0,nextAttempt:0,pushTimestamp:0};
       return {created:true,expiresAt};
     });
+    log('Activity registered',JSON.stringify({activityId:id,created:result.created,expiresAt:result.expiresAt}));
     res.status(result.created?201:200).json({activityId:id,expiresAt:result.expiresAt});
   });
   app.get('/v1/activities/:id',(req,res)=>{
     const a=store.read().activities[req.params.id];if(!a||a.deviceId!==req.deviceId)throw fail(404,'not_found');
-    res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null});
+    res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:a.endReason??null});
   });
   app.delete('/v1/activities/:id',(req,res)=>{
-    store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endedAt=seconds();a.token=null;a.version++;}});
+    store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endReason='client_deleted';a.endedAt=seconds();a.token=null;a.version++;log('Activity ended',a.id,'client_deleted');}});
     res.status(204).end();
   });
   app.get('/v1/devices/me',(req,res)=>{
