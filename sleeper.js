@@ -26,7 +26,11 @@ export async function getJSON(url, {fetchImpl=fetch} = {}) {
     reader.releaseLock();
   }
 }
-export function createSleeper(load = getJSON, now = Date.now, {onFetch} = {}) {
+export function createSleeper(load = getJSON, now = Date.now, {onFetch, maxActivities=100} = {}) {
+  if (!Number.isInteger(maxActivities) || maxActivities<1 || maxActivities>1000)
+    throw new Error('Invalid cache maxActivities');
+  // One matchup and one metadata entry per activity, plus room for browsing.
+  const maxEntries=maxActivities*2+100;
   const limit = createRateLimiter(now,1);
   const beforeFetch = onFetch ?? (() => {
     try { limit('global:upstream',60); }
@@ -37,11 +41,15 @@ export function createSleeper(load = getJSON, now = Date.now, {onFetch} = {}) {
   const cache = new Map(), pending = new Map();
   async function memo(key, ttl, fn) {
     const hit = cache.get(key);
-    if (hit && now() - hit.time < ttl) return hit.value;
+    if (hit) {
+      // Refresh recency without extending freshness or changing score timestamps.
+      cache.delete(key); cache.set(key,hit);
+      if (now() - hit.time < ttl) return hit.value;
+    }
     if (pending.has(key)) return pending.get(key);
     const task = Promise.resolve().then(fn).then(value => {
       cache.delete(key); cache.set(key, { time: now(), value });
-      while (cache.size > 200) cache.delete(cache.keys().next().value);
+      while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
       return value;
     }).catch(error => {
       // Preserve the original timestamp: cached scores must not appear refreshed.

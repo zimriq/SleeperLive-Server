@@ -96,3 +96,48 @@ test('metadata budget counts three fetches and stale fallback is limited to budg
   await broken.matchups('123456789',6);fail=true;time+=5000;
   await assert.rejects(broken.matchups('123456789',6),/network failure/);
 });
+
+test('150 leagues retain metadata across polling rounds with capacity sized from activity limit',async()=>{
+  const counter={calls:0};let time=0;
+  // Isolate cache behavior from the independent shared fetch allowance.
+  const api=createSleeper(leagueLoader(counter),()=>time,{maxActivities:150,onFetch:()=>{}});
+  const round=async()=>{
+    for(let i=0;i<150;i++)await Promise.all([api.matchups(String(200000000+i),6),api.meta(String(200000000+i))]);
+  };
+  await round();assert.equal(counter.calls,600);
+  await round();assert.equal(counter.calls,600);
+  time=75000;await round();assert.equal(counter.calls,750);
+  time=150000;await round();assert.equal(counter.calls,900);
+});
+
+test('cache evicts the least recently read entry while staying bounded',async()=>{
+  const counter={calls:0};
+  const api=createSleeper(leagueLoader(counter),()=>0,{maxActivities:1,onFetch:()=>{}});
+  for(let i=0;i<102;i++)await api.matchups(String(200000000+i),6);
+  await api.matchups('200000000',6);assert.equal(counter.calls,102);
+  await api.matchups('200000102',6);assert.equal(counter.calls,103);
+  await api.matchups('200000000',6);assert.equal(counter.calls,103);
+  await api.matchups('200000001',6);assert.equal(counter.calls,104);
+});
+
+test('cache reads preserve TTL and stale fallback preserves score timestamps',async()=>{
+  const counter={calls:0};let time=0,blocked=false;
+  const api=createSleeper(leagueLoader(counter),()=>time,{onFetch:()=>{
+    if(blocked)throw Object.assign(Error('rate_limited'),{code:'UPSTREAM_RATE_LIMITED'});
+  }});
+  await api.matchups('123456789',6);
+  time=4999;await api.matchups('123456789',6);assert.equal(counter.calls,1);
+  time=5000;assert.equal((await api.matchups('123456789',6)).updatedAt,5);
+  assert.equal(counter.calls,2);
+  time=10000;blocked=true;
+  assert.equal((await api.matchups('123456789',6)).updatedAt,5);
+  assert.equal(counter.calls,2);
+  blocked=false;
+  assert.equal((await api.matchups('123456789',6)).updatedAt,10);
+  assert.equal(counter.calls,3);
+});
+
+test('cache sizing rejects invalid activity capacities',()=>{
+  for(const maxActivities of [0,-1,1.5,1001,NaN,'150'])
+    assert.throws(()=>createSleeper(undefined,Date.now,{maxActivities}),/Invalid cache maxActivities/);
+});
