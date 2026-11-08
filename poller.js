@@ -1,3 +1,4 @@
+import { logInfo, logError } from './logging.js';
 import { createHash } from 'node:crypto';
 import { snapshot } from './sleeper.js';
 export function changed(a,b) {
@@ -5,7 +6,7 @@ export function changed(a,b) {
   return ['yourScore','opponentScore','yourProjectionKind','opponentProjectionKind'].some(k=>a[k]!==b[k]) ||
     ['yourProjected','opponentProjected'].some(k=>(a[k]===null)!==(b[k]===null) || (a[k]!==null && Math.abs(a[k]-b[k])>=0.5));
 }
-export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pushConcurrency=4,freshnessPriority=5,now=Date.now,log=console.warn}) {
+export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pushConcurrency=4,freshnessPriority=5,now=Date.now,log=logInfo,errorLog=logError}) {
   if(!Number.isInteger(pushConcurrency)||pushConcurrency<1||pushConcurrency>16)throw Error('Invalid push concurrency');
   if(![5,10].includes(freshnessPriority))throw Error('Invalid freshness priority');
   let timer, running, stopped=true;
@@ -99,15 +100,16 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
     const worker=async()=>{
       while(cursor<jobs.length){
         const job=jobs[cursor++];
-        try{await job();}catch{log('Activity update failed; retaining last valid state');}
+        try{await job();}catch(error){errorLog('activity_update_failed',error);}
       }
     };
     // Tick and shutdown wait for all workers; one slow send occupies only one slot.
     await Promise.all(Array.from({length:Math.min(pushConcurrency,jobs.length)},worker));
     status.lastRunAt=seconds();
+    status.lastError=null;
   }
   return {
-    tick(){if(running)return running;running=run().catch(e=>{status.lastError=e.message;log('Poll failed');}).finally(()=>{running=null;});return running;},
+    tick(){if(running)return running;running=run().catch(e=>{status.lastError=e.message;errorLog('poll_failed',e);}).finally(()=>{running=null;});return running;},
     start(){if(!stopped)return;stopped=false;const loop=async()=>{await this.tick();if(!stopped)timer=setTimeout(loop,pollMs);};timer=setTimeout(loop,0);},
     async stop(){stopped=true;clearTimeout(timer);if(running)await running;},
     status:()=>({...status}),

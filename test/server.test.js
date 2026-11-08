@@ -404,9 +404,9 @@ test('explicit private invite enrollment works alongside App Attest and never ca
 });
 
 
-test('public health preserves the iOS contract without exposing or consulting internal status',async t=>{
+test('public health preserves the iOS contract without exposing private status or reading storage',async t=>{
   for(const mode of ['live','dry-run']){
-    const f=await fixture(t,{cfg:{mode},poller:{status:()=>{throw Error('private database path and credentials');}}});
+    const f=await fixture(t,{cfg:{mode},poller:{status:()=>({lastRunAt:T,lastError:'private database path and credentials'})}});
     let reads=0;
     const read=f.store.read;
     f.store.read=()=>{reads++;return read();};
@@ -807,4 +807,52 @@ test('cached traffic cannot exhaust upstream budget for a third device registrat
   assert.equal((await f.call('/v1/matchup?leagueId=123456789&week=6&rosterId=1','GET',null,third.deviceToken)).status,200);
   assert.equal((await f.call('/v1/activities/third-new','PUT',registration,third.deviceToken)).status,201);
   assert.equal(calls,4);
+});
+
+test('health allows startup grace, detects stalled completion, and recovers',async t=>{
+  let time=T,lastRunAt=null;
+  const f=await fixture(t,{now:()=>time*1000,cfg:{pollMs:60000},poller:{status:()=>({lastRunAt,lastError:'private'})}});
+  const check=async(status,ok)=>{
+    const response=await f.call('/health');
+    assert.equal(response.status,status);
+    assert.equal(response.headers.get('cache-control'),'no-store');
+    assert.deepEqual(await response.json(),{ok,mode:'dry-run'});
+  };
+  await check(200,true);
+  time=T+180;await check(200,true);
+  time++;await check(503,false);
+  lastRunAt=time;await check(200,true);
+  time+=181;await check(503,false);
+  lastRunAt=time;await check(200,true);
+});
+
+test('unexpected request failures log a safe stack and preserve generic response',async t=>{
+  const messages=[],original=console.error;
+  console.error=message=>messages.push(JSON.parse(message));
+  t.after(()=>{console.error=original;});
+  const f=await fixture(t);
+  f.store.read=()=>{throw Error('body-secret\n    at bearer-secret');};
+  const response=await f.call('/v1/activities/activity-1','GET',null,f.token);
+  assert.equal(response.status,500);
+  assert.deepEqual(await response.json(),{error:'internal_error'});
+  assert.equal(messages.length,1);
+  assert.equal(messages[0].level,'error');assert.equal(messages[0].event,'request_failed');
+  assert.match(messages[0].stack,/server.test.js/);
+  const output=JSON.stringify(messages);
+  for(const secret of ['body-secret','bearer-secret',f.token])assert.equal(output.includes(secret),false);
+});
+
+test('completed ticks remain healthy through upstream outages; failed ticks recover',async t=>{
+  let time=T,fail=false;
+  const errors=[],store=openStore(':memory:');t.after(()=>store.close());
+  store.change(s=>{s.activities.a=activity();});
+  const read=store.read.bind(store);
+  store.read=()=>{if(fail)throw Error('private');return read();};
+  const poll=createPoller({store,now:()=>time*1000,sleeper:{matchups:async()=>{throw Error('outage');},meta:async()=>meta},transport:{send:async()=>{throw Error('must not send');}},log:()=>{},errorLog:(event)=>errors.push(event)});
+  await poll.tick();assert.equal(poll.status().lastRunAt,T);assert.equal(poll.status().lastError,null);
+  time+=75;fail=true;await poll.tick();
+  assert.equal(poll.status().lastRunAt,T);assert.equal(poll.status().lastError,'private');
+  assert.deepEqual(errors,['poll_failed']);
+  time+=75;fail=false;await poll.tick();
+  assert.equal(poll.status().lastRunAt,time);assert.equal(poll.status().lastError,null);
 });

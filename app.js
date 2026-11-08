@@ -1,3 +1,4 @@
+import { logInfo, logError } from './logging.js';
 import express from 'express';
 import { revokeDevice } from './revoke-device.js';
 import { clientIP } from './client-ip.js';
@@ -8,7 +9,7 @@ import { snapshot } from './sleeper.js';
 const hash = text=>createHash('sha256').update(text).digest('hex');
 const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(b),'hex'));
 const fail=(status,error)=>Object.assign(new Error(error),{status});
-export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=console.warn}) {
+export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=logInfo,errorLog=logError}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
   const matchupLimit=createRateLimiter(now,1000);
   app.disable('x-powered-by');app.set('trust proxy',false);
@@ -43,8 +44,13 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=c
   });
   app.use('/v1/enrollment', enrollmentRouter({cfg,store,limit,now}));
   app.use(express.json({limit:'8kb',inflate:false}));
-  // Public liveness only. Preserve the iOS mode contract without exposing internal errors.
-  app.get('/health',(_,res)=>res.set('Cache-Control','no-store').json({ok:true,mode:cfg.mode}));
+  const healthStartedAt=seconds(), healthGrace=(cfg.pollMs??75000)*3/1000;
+  // Completion measures poller progress, not whether every upstream request succeeds.
+  app.get('/health',(_,res)=>{
+    const lastRunAt=poller?.status().lastRunAt;
+    const ok=!poller || seconds()-(lastRunAt??healthStartedAt)<=healthGrace;
+    res.status(ok?200:503).set('Cache-Control','no-store').json({ok,mode:cfg.mode});
+  });
   app.post('/v1/devices',(req,res)=>{
     res.set('Cache-Control','no-store');
     if(!(cfg.inviteEnabled ?? !cfg.attestEnabled))throw fail(404,'not_found');
@@ -148,6 +154,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=c
   app.use((req,res)=>res.status(404).json({error:'not_found'}));
   app.use((err,req,res,next)=>{
     const status=err.type==='entity.parse.failed'?400:err.type==='entity.too.large'?413:err.status??500;
+    if(status===500)errorLog('request_failed',err);
     if(status===429||status===503)res.set('Retry-After','75');
     res.status(status).json({error:status===500?'internal_error':err.type??err.message});
   });

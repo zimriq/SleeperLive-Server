@@ -1,3 +1,4 @@
+import { logInfo } from './logging.js';
 import { createHTTPServer } from './http-server.js';
 import { config } from './config.js';
 import { openStore } from './registrations.js';
@@ -12,7 +13,7 @@ const cfg=config(),store=openStore(cfg.db),sleeper=createSleeper();
 const estimator=cfg.projections?createEstimator():undefined,transport=createAPNs(cfg);
 const poller=createPoller({store,sleeper,transport,estimator,pollMs:cfg.pollMs,pushConcurrency:cfg.pushConcurrency,freshnessPriority:cfg.freshnessPriority});
 const app=createApp({cfg,store,sleeper,estimator,poller});
-const server=createHTTPServer(app).listen(cfg.port,()=>{console.log(`SleeperLive listening on ${cfg.port}; APNs ${cfg.mode}`);poller.start();});
+const server=createHTTPServer(app).listen(cfg.port,()=>{logInfo(`SleeperLive listening on ${cfg.port}; APNs ${cfg.mode}`);poller.start();});
 let stopping=false;
 async function stop(){
   if(stopping)return;stopping=true;

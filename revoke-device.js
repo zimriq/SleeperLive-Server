@@ -1,9 +1,10 @@
+import { logInfo } from './logging.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openStore } from './registrations.js';
 
-export function revokeDevice(store, deviceId, {now=Date.now,log=console.warn}={}) {
+export function revokeDevice(store, deviceId, {now=Date.now,log=logInfo}={}) {
   if(!/^[a-f0-9]{32}$/.test(deviceId))throw Error('Invalid device ID');
   return store.change(state=>{
     const device=state.devices[deviceId];
