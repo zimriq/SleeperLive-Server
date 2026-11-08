@@ -13,7 +13,12 @@ export function classify(status, reason) {
   // BadDeviceToken can mean a wrong environment/topic: don't permanently discard on configuration errors.
   return 'retry';
 }
-export function createAPNs(cfg, now = Date.now) {
+export function createAPNs(cfg, now = Date.now, {
+  connect=host=>http2.connect(host), requestTimeoutMs=12000, sessionIdleMs=60000,
+  errorLog=record=>console.error(JSON.stringify({level:'error',...record})),
+} = {}) {
+  for (const value of [requestTimeoutMs,sessionIdleMs])
+    if (!Number.isInteger(value) || value<1) throw new Error('Invalid APNs timeout');
   if (cfg.mode === 'dry-run') return { async send(message) { return {kind:'ok', dryRun:true}; }, close() {} };
   function signer(pem, keyId) {
     const key = createPrivateKey(pem);
@@ -32,27 +37,49 @@ export function createAPNs(cfg, now = Date.now) {
   }
   const defaultAuthorization = signer(cfg.key, cfg.keyId);
   const productionAuthorization = cfg.productionKey ? signer(cfg.productionKey, cfg.productionKeyId) : defaultAuthorization;
-  const sessions = new Map();
+  const sessions = new Map(), failures = new Map();
+  const knownReasons=new Set(['BadDeviceToken','DeviceTokenNotForTopic','BadTopic','TopicDisallowed',
+    'InvalidProviderToken','ExpiredProviderToken','MissingProviderToken','Forbidden','TooManyRequests',
+    'InternalServerError','ServiceUnavailable','Shutdown','Timeout','ConnectionError','ConnectionClosed',
+    'TransportError','PayloadTooLarge']);
+  function observe(env,result) {
+    if(result.kind!=='retry'){failures.delete(env);return result;}
+    const reason=knownReasons.has(result.reason)?result.reason:'Other';
+    const signature=`${result.status??''}:${result.reason??''}`;
+    const previous=failures.get(env);
+    const count=previous?.signature===signature?previous.count+1:1;
+    failures.set(env,{signature,count});
+    if(count===3)errorLog({event:'apns_repeated_failure',environment:env,
+      status:result.status??null,reason,consecutiveFailures:count});
+    return result;
+  }
   function session(env) {
     const host = env === 'development' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com';
     let s = sessions.get(host);
     if (s && !s.closed && !s.destroyed) return s;
-    s = http2.connect(host); sessions.set(host,s);
+    s = connect(host); sessions.set(host,s);
     const remove = () => { if(sessions.get(host)===s) sessions.delete(host); };
+    s.setTimeout(sessionIdleMs,()=>{remove();s.destroy();});
     s.on('error', () => {remove();s.destroy();}); s.on('goaway', () => {remove();s.close();}); s.on('close', remove);
     return s;
   }
   return {
     async send(message) {
       const body = JSON.stringify(payload(message));
-      if (Buffer.byteLength(body)>4096) return {kind:'retry',reason:'PayloadTooLarge'};
+      if (Buffer.byteLength(body)>4096) return observe(message.env,{kind:'retry',reason:'PayloadTooLarge'});
       try {
-        return await new Promise(resolve => {
-          let req, done=false, status, data='';
+        const result = await new Promise(resolve => {
+          let req, connection, done=false, status, data='';
           const finish = result => {if(done)return;done=true;clearTimeout(timer);resolve(result);};
-          const timer = setTimeout(()=>{finish({kind:'retry',reason:'Timeout'});req?.close();},12000);
+          const timer = setTimeout(()=>{
+            finish({kind:'retry',reason:'Timeout'});
+            // This session may have been replaced already; never remove its replacement.
+            for(const [host,s] of sessions)if(s===connection)sessions.delete(host);
+            connection?.destroy();
+          },requestTimeoutMs);
           try {
-            req=session(message.env).request({':method':'POST',':path':`/3/device/${message.token}`,
+            connection=session(message.env);
+            req=connection.request({':method':'POST',':path':`/3/device/${message.token}`,
               authorization:message.env === 'development' ? defaultAuthorization() : productionAuthorization(),'apns-topic':`${cfg.bundleId}.push-type.liveactivity`,
               'apns-push-type':'liveactivity','apns-priority':pushPriority(message),
               'apns-expiration':String(Math.floor(now()/1000)+300),'content-type':'application/json'});
@@ -63,7 +90,8 @@ export function createAPNs(cfg, now = Date.now) {
             req.on('close',()=>finish({kind:'retry',reason:'ConnectionClosed'})); req.end(body);
           }catch{finish({kind:'retry',reason:'ConnectionError'});}
         });
-      }catch {return {kind:'retry',reason:'TransportError'};}
+        return observe(message.env,result);
+      }catch {return observe(message.env,{kind:'retry',reason:'TransportError'});}
     },
     close(){for(const s of sessions.values())s.destroy();sessions.clear();},
   };
