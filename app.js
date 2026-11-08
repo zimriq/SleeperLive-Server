@@ -9,6 +9,7 @@ import { snapshot } from './sleeper.js';
 const hash = text=>createHash('sha256').update(text).digest('hex');
 const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(b),'hex'));
 const fail=(status,error)=>Object.assign(new Error(error),{status});
+const ownActivity=(activities,id)=>Object.hasOwn(activities,id)?activities[id]:undefined;
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=logInfo,errorLog=logError}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
   const matchupLimit=createRateLimiter(now,1000);
@@ -69,8 +70,10 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
       return res.status(401).json({error:'unauthorized'});
     next();
   });
-  function identity(body){
-    const {leagueId}=body,week=Number(body.week),rosterId=Number(body.rosterId);
+  function identity(body,query=false){
+    const number=value=>query && typeof value==='string' && /^\d+$/.test(value)
+      ? Number(value) : value;
+    const {leagueId}=body,week=number(body.week),rosterId=number(body.rosterId);
     if(typeof leagueId!=='string' || !/^\d{6,25}$/.test(leagueId) || !Number.isInteger(week)||week<1||week>18||!Number.isInteger(rosterId)||rosterId<1||rosterId>100)throw fail(400,'invalid_matchup');
     return {leagueId,week,rosterId};
   }
@@ -80,7 +83,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
   }
   app.get('/v1/matchup',async(req,res)=>{
     matchupLimit(req.deviceId,10);
-    res.json(await getSnapshot(identity(req.query)));
+    res.json(await getSnapshot(identity(req.query,true)));
   });
   app.put('/v1/activities/:id',async(req,res)=>{
     const id=req.params.id,b=req.body??{},p=identity(b),t=seconds();
@@ -92,12 +95,12 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
       if(!['active','awaiting_token'].includes(a.status)||a.expiresAt<=seconds())throw fail(409,'activity_ended');
       if(a.leagueId!==p.leagueId||a.week!==p.week||a.rosterId!==p.rosterId||a.startedAt!==b.startedAt)throw fail(409,'identity_mismatch');
     };
-    const existing=store.read().activities[id];if(existing)check(existing);
+    const existing=ownActivity(store.read().activities,id);if(existing)check(existing);
     if(b.startedAt>t+30||b.startedAt<=t-28800)throw fail(400,'invalid_started_at');
     const snap=existing?null:await getSnapshot(p);
     const result=store.change(s=>{
       if(!s.devices[req.deviceId]||s.devices[req.deviceId].revoked)throw fail(401,'unauthorized');
-      const a=s.activities[id];
+      const a=ownActivity(s.activities,id);
       if(a){
         check(a);
         if(a.status==='awaiting_token' && a.invalidTokenHash===hash(b.pushToken.toLowerCase()) && a.env===b.apnsEnvironment)
@@ -127,11 +130,11 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
     res.status(result.created?201:200).json({activityId:id,expiresAt:result.expiresAt,...(result.needsPushToken?{needsPushToken:true}:{})});
   });
   app.get('/v1/activities/:id',(req,res)=>{
-    const a=store.read().activities[req.params.id];if(!a||a.deviceId!==req.deviceId)throw fail(404,'not_found');
+    const a=ownActivity(store.read().activities,req.params.id);if(!a||a.deviceId!==req.deviceId)throw fail(404,'not_found');
     res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:a.endReason??a.endedReason??null,needsPushToken:a.status==='awaiting_token',endedReason:a.endedReason??a.endReason??null,endedAt:a.endedAt??null});
   });
   app.delete('/v1/activities/:id',(req,res)=>{
-    store.change(s=>{const a=s.activities[req.params.id];if(a?.deviceId===req.deviceId){a.status='ended';a.endReason='user_delete';a.endedReason='user_delete';a.endedAt=seconds();a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;a.version++;log(`event=ended activity=${a.id.slice(0,8)} reason=user_delete`);}});
+    store.change(s=>{const a=ownActivity(s.activities,req.params.id);if(a?.deviceId===req.deviceId){a.status='ended';a.endReason='user_delete';a.endedReason='user_delete';a.endedAt=seconds();a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;a.version++;log(`event=ended activity=${a.id.slice(0,8)} reason=user_delete`);}});
     res.status(204).end();
   });
   app.get('/v1/devices/me',(req,res)=>{

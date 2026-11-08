@@ -856,3 +856,46 @@ test('completed ticks remain healthy through upstream outages; failed ticks reco
   time+=75;fail=false;await poll.tick();
   assert.equal(poll.status().lastRunAt,time);assert.equal(poll.status().lastError,null);
 });
+
+test('registration rejects coercible non-number identities before upstream work',async t=>{
+  let calls=0;
+  const f=await fixture(t,{sleeper:{matchups:async()=>{calls++;return {rows,updatedAt:T};},meta:async()=>{calls++;return meta;}}});
+  for(const field of ['week','rosterId']){
+    for(const value of [true,false,null,[],[1],{},'1',1.5]){
+      const response=await f.call('/v1/activities/strict-id','PUT',{...registration,[field]:value},f.token);
+      assert.equal(response.status,400,`${field}=${JSON.stringify(value)}`);
+      assert.deepEqual(await response.json(),{error:'invalid_matchup'});
+    }
+  }
+  assert.equal(calls,0);assert.deepEqual(f.store.read().activities,{});
+  assert.equal((await f.call('/v1/activities/strict-id','PUT',registration,f.token)).status,201);
+});
+
+test('matchup query accepts numeric strings and rejects repeated or non-numeric values',async t=>{
+  const f=await fixture(t);
+  const base='/v1/matchup?leagueId=123456789&';
+  assert.equal((await f.call(base+'week=6&rosterId=1','GET',null,f.token)).status,200);
+  for(const query of ['week=true&rosterId=1','week=6&rosterId=true','week=6&week=7&rosterId=1','week=6&rosterId=1&rosterId=2','week=&rosterId=1','week=6&rosterId=1.5']){
+    const response=await f.call(base+query,'GET',null,f.token);
+    assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:'invalid_matchup'});
+  }
+});
+
+test('object-property activity IDs support creation, retry, ownership checks and deletion',async t=>{
+  const f=await fixture(t);
+  const other=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  for(const id of ['constructor','toString','hasOwnProperty']){
+    const path=`/v1/activities/${id}`;
+    assert.equal((await f.call(path,'GET',null,f.token)).status,404);
+    assert.equal((await f.call(path,'DELETE',null,f.token)).status,204);
+    assert.equal((await f.call(path,'PUT',registration,f.token)).status,201);
+    assert.equal((await f.call(path,'PUT',registration,f.token)).status,200);
+    assert.equal((await(await f.call(path,'GET',null,f.token)).json()).activityId,id);
+    assert.equal((await f.call(path,'GET',null,other.deviceToken)).status,404);
+    assert.equal((await f.call(path,'PUT',registration,other.deviceToken)).status,404);
+    assert.equal((await f.call(path,'DELETE',null,other.deviceToken)).status,204);
+    assert.equal(f.store.read().activities[id].status,'active');
+    assert.equal((await f.call(path,'DELETE',null,f.token)).status,204);
+    assert.equal(f.store.read().activities[id].status,'ended');
+  }
+});
