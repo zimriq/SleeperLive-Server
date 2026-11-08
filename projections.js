@@ -64,8 +64,11 @@ export function estimateTeam(row, rules, projections, games) {
   return { points: score(row) + delta, kind: allFinal ? 'final' : 'estimate' };
 }
 export function createEstimator(load = getJSON, now = Date.now) {
-  let cache, pending, playersCache, retryAfter = 0;
+  const cache=new Map();
+  let pending, playersCache, retryAfter = 0;
   return async (league, week, rows) => {
+    if(typeof league?.season!=='string' || !/^\d{4}$/.test(league.season)
+      || !Number.isInteger(week) || week<1 || week>18) return rows.map(()=>null);
     const key = `${league.season}:${week}`;
     const fetchFeeds = async () => {
       const feeds = await Promise.allSettled([
@@ -89,28 +92,39 @@ export function createEstimator(load = getJSON, now = Date.now) {
         if (String(p.season) !== String(league.season) || p.week !== week || p.season_type !== 'regular') continue;
         values.set(p.player_id, p);
       }
-      cache = { key, at: now(), values, games }; return cache;
+      const result={key,at:now(),values,games};
+      cache.delete(key);cache.set(key,result);
+      while(cache.size>4)cache.delete(cache.keys().next().value);
+      return result;
     };
     // Shared cooldown also covers different weeks: changing a request key must not
     // bypass protection for the same upstream services. Keep only one batch in flight.
-    const fresh = () => cache?.key === key && now()-cache.at <= 60000;
-    if (!fresh()) {
-      if (pending && pending.key !== key) await pending.task;
-      if (!fresh()) {
-        if (now() < retryAfter) return rows.map(()=>null);
-        if (!pending) {
-          const task = fetchFeeds().catch(() => {
-            retryAfter = now()+60000;
-            return null;
-          });
-          pending = {key, task};
-          task.finally(() => { if (pending?.task === task) pending = null; }).catch(()=>{});
-        }
-        const result = await pending.task;
-        if (!result || result.key !== key) return rows.map(()=>null);
-        return rows.map(row => estimateTeam(row, league.scoring_settings, result.values, result.games));
+    const fresh = () => {
+      const entry=cache.get(key);
+      if(!entry || now()-entry.at>60000)return null;
+      cache.delete(key);cache.set(key,entry);
+      return entry;
+    };
+    let result=fresh();
+    while(!result) {
+      if(pending) {
+        const sameKey=pending.key===key;
+        const fetched=await pending.task;
+        if(sameKey){result=fetched;break;}
+        result=fresh();
+        continue;
       }
+      if(now()<retryAfter)break;
+      const task=fetchFeeds().catch(()=>{
+        retryAfter=now()+60000;
+        return null;
+      });
+      pending={key,task};
+      task.finally(()=>{if(pending?.task===task)pending=null;}).catch(()=>{});
+      result=await task;
+      break;
     }
-    return rows.map(row => estimateTeam(row, league.scoring_settings, cache.values, cache.games));
+    return rows.map(row=>result
+      ? estimateTeam(row,league.scoring_settings,result.values,result.games) : null);
   };
 }

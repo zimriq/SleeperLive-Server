@@ -78,3 +78,48 @@ test('concurrent successful weeks use their own feed results',async()=>{
   for(const estimates of result)assert.equal(estimates[0].points,15);
   assert.equal(calls,5,'second week reuses the daily player cache');
 });
+
+test('alternating weeks retain independent estimates until their own freshness expires',async()=>{
+  let calls=0,time=100000;
+  const estimator=createEstimator(async url=>{calls++;return validFeed(url);},()=>time);
+  await estimator(league,6,rows);time+=10000;await estimator(league,7,rows);
+  for(let i=0;i<10;i++)assert.equal((await estimator(league,i%2?6:7,rows))[0].points,15);
+  assert.equal(calls,5);
+  time=160001;await estimator(league,6,rows);assert.equal(calls,7);
+  await estimator(league,7,rows);assert.equal(calls,7,'week 7 has its own freshness deadline');
+});
+
+test('estimate cache stays bounded and evicts the least recently used season/week',async()=>{
+  let calls=0;
+  const estimator=createEstimator(async url=>{calls++;return validFeed(url);},()=>100000);
+  for(let week=1;week<=4;week++)await estimator(league,week,rows);
+  assert.equal(calls,9);
+  await estimator(league,1,rows);await estimator(league,5,rows);assert.equal(calls,11);
+  await estimator(league,1,rows);assert.equal(calls,11);
+  await estimator(league,2,rows);assert.equal(calls,13);
+});
+
+test('invalid season and week values never reach upstream feeds',async()=>{
+  let calls=0;
+  const estimator=createEstimator(async url=>{calls++;return validFeed(url);});
+  for(const season of ['2026/../2025','2026?x=1','26',2026,null,{},['2026'],'2026\n'])
+    assert.deepEqual(await estimator({...league,season},6,rows),[null,null]);
+  for(const week of [true,'6',0,19,1.5])
+    assert.deepEqual(await estimator(league,week,rows),[null,null]);
+  assert.equal(calls,0);
+});
+
+test('same week in different seasons has separate cached results',async()=>{
+  let calls=0;
+  const estimator=createEstimator(async url=>{
+    calls++;
+    const feed=validFeed(url.replaceAll('2025','2026'));
+    if(!url.includes('2025'))return feed;
+    if(Array.isArray(feed))return feed.map(p=>({...p,season:'2025',stats:{gp:1,rec:8}}));
+    return {...feed,season:{year:2025},events:feed.events.map(e=>({...e,season:{year:2025}}))};
+  },()=>100000);
+  assert.equal((await estimator(league,6,rows))[0].points,15);
+  assert.equal((await estimator({...league,season:'2025'},6,rows))[0].points,18);
+  assert.equal((await estimator(league,6,rows))[0].points,15);
+  assert.equal(calls,5);
+});
