@@ -778,3 +778,33 @@ test('projection traffic cannot indefinitely postpone urgent freshness heartbeat
   for(let i=0;i<3;i++){time+=75;projection++;await poll.tick();}
   assert.deepEqual(sent.map(m=>m.priority),[10,5,5,10]);assert.equal(sent.at(-1).cause,'heartbeat');store.close();
 });
+
+test('matchup cap is per device and does not block another device or registration',async t=>{
+  const f=await fixture(t);
+  const path='/v1/matchup?leagueId=123456789&week=6&rosterId=1';
+  for(let i=0;i<10;i++)assert.equal((await f.call(path,'GET',null,f.token)).status,200);
+  assert.equal((await f.call(path,'GET',null,f.token)).status,429);
+  const other=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  assert.equal((await f.call(path,'GET',null,other.deviceToken)).status,200);
+  assert.equal((await f.call('/v1/activities/activity-new','PUT',registration,f.token)).status,201);
+});
+
+test('cached traffic cannot exhaust upstream budget for a third device registration',async t=>{
+  let calls=0;
+  const api=createSleeper(async url=>{
+    calls++;
+    if(url.includes('/matchups/'))return rows;
+    if(url.endsWith('/rosters'))return meta.rosters;
+    if(url.endsWith('/users'))return meta.users;
+    return meta.info;
+  },()=>T*1000);
+  const f=await fixture(t,{sleeper:api});
+  const second=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  for(const token of [f.token,second.deviceToken]){
+    for(let i=0;i<30;i++)assert.equal((await f.call(`/v1/activities/cached-${token.slice(0,8)}`,'PUT',registration,token)).status,i===0?201:200);
+  }
+  const third=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  assert.equal((await f.call('/v1/matchup?leagueId=123456789&week=6&rosterId=1','GET',null,third.deviceToken)).status,200);
+  assert.equal((await f.call('/v1/activities/third-new','PUT',registration,third.deviceToken)).status,201);
+  assert.equal(calls,4);
+});

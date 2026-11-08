@@ -1,7 +1,7 @@
 import express from 'express';
 import { revokeDevice } from './revoke-device.js';
 import { clientIP } from './client-ip.js';
-import { createApiRateLimiter } from './rate-limit.js';
+import { createRateLimiter, createApiRateLimiter } from './rate-limit.js';
 import { enrollmentRouter } from './enrollment.js';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { snapshot } from './sleeper.js';
@@ -10,6 +10,7 @@ const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(
 const fail=(status,error)=>Object.assign(new Error(error),{status});
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=console.warn}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
+  const matchupLimit=createRateLimiter(now,1000);
   app.disable('x-powered-by');app.set('trust proxy',false);
   // Verify fixed-size bearer credentials using the committed, bounded memory index.
   // Unknown credentials never allocate cache entries or trigger database reads.
@@ -68,11 +69,13 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=c
     return {leagueId,week,rosterId};
   }
   async function getSnapshot(p){
-    limit('global:upstream',60);
     try{const [data,meta]=await Promise.all([sleeper.matchups(p.leagueId,p.week),sleeper.meta(p.leagueId)]);return await snapshot(data,meta,p.rosterId,p.week,estimator);}
     catch{throw fail(503,'matchup_unavailable');}
   }
-  app.get('/v1/matchup',async(req,res)=>res.json(await getSnapshot(identity(req.query))));
+  app.get('/v1/matchup',async(req,res)=>{
+    matchupLimit(req.deviceId,10);
+    res.json(await getSnapshot(identity(req.query)));
+  });
   app.put('/v1/activities/:id',async(req,res)=>{
     const id=req.params.id,b=req.body??{},p=identity(b),t=seconds();
     if(!/^[A-Za-z0-9-]{8,80}$/.test(id)||typeof b.pushToken!=='string'||!/^([a-fA-F0-9]{2}){16,256}$/.test(b.pushToken)||!['development','production'].includes(b.apnsEnvironment))throw fail(400,'invalid_activity');
