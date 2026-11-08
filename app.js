@@ -14,6 +14,7 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
   const matchupLimit=createRateLimiter(now,1000);
   app.disable('x-powered-by');app.set('trust proxy',false);
+  app.use((req,res,next)=>{res.set('X-Content-Type-Options','nosniff');next();});
   // Verify fixed-size bearer credentials using the committed, bounded memory index.
   // Unknown credentials never allocate cache entries or trigger database reads.
   let ingressUntil=0;

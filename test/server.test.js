@@ -899,3 +899,21 @@ test('object-property activity IDs support creation, retry, ownership checks and
     assert.equal(f.store.read().activities[id].status,'ended');
   }
 });
+
+test('nosniff is present on successful, rejected, malformed and rate-limited responses',async t=>{
+  const f=await fixture(t);
+  const check=async(response,status)=>{
+    assert.equal(response.status,status);
+    assert.equal(response.headers.get('x-content-type-options'),'nosniff');
+  };
+  await check(await f.call('/health'),200);
+  await check(await f.call('/v1/devices/me','GET',null,f.token),200);
+  await check(await f.call('/v1/devices/me'),401);
+  await check(await f.call('/missing'),404);
+  await check(await fetch(f.root+'/v1/activities/activity-1',{
+    method:'PUT',headers:{'content-type':'application/json',authorization:`Bearer ${f.token}`},body:'{'
+  }),400);
+  const limited=await fixture(t,{cfg:{ingressGlobal:1,ingressPerIP:1}});
+  await check(await limited.call('/v1/devices/me','GET',null,limited.token),200);
+  await check(await limited.call('/v1/devices/me','GET',null,limited.token),429);
+});
