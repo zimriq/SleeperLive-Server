@@ -4,6 +4,8 @@ import { dirname } from 'node:path';
 
 // One small, transactional document is sufficient for this single-instance service.
 // No async work may run inside change(): limit checks and writes remain atomic.
+export const DAY_SECONDS = 86400;
+
 export function openStore(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path);
@@ -15,16 +17,26 @@ export function openStore(path) {
   const index = state => {
     const entries=Object.entries(state.devices).filter(([,device])=>!device.revoked);
     if(entries.length>1000)throw Error('Active device index capacity exceeded');
-    return new Map(entries.map(([id,device])=>[id,device.hash]));
+    return new Map(entries.map(([id,device])=>[id,{hash:device.hash,lastSeenAt:device.lastSeenAt}]));
   };
   let credentials=index(JSON.parse(read.get().value));
-  return {
-    credentialHash: id => credentials.get(id),
+  const store = {
+    credentialHash: id => credentials.get(id)?.hash,
+    recordDeviceUse(id, hash, at) {
+      const due = device => device && !device.revoked && device.hash === hash
+        && (!Number.isFinite(device.lastSeenAt) || at - device.lastSeenAt >= DAY_SECONDS);
+      if (!due(credentials.get(id))) return;
+      store.change(state => {
+        const device = state.devices[id];
+        if (due(device)) device.lastSeenAt = at;
+      });
+    },
     read: () => JSON.parse(read.get().value),
     change(fn) {
       db.exec('BEGIN IMMEDIATE');
       try {
-        const state = JSON.parse(read.get().value);
+        const previous = read.get().value;
+        const state = JSON.parse(previous);
         const result = fn(state);
         if (result instanceof Promise) throw new Error('Transactions must be synchronous');
         // Keep replay-blocking IDs, but discard authentication material no longer
@@ -32,11 +44,17 @@ export function openStore(path) {
         for(const device of Object.values(state.devices)){
           if(device.revoked){delete device.hash;delete device.attestPublicKey;}
         }
+        const value = JSON.stringify(state);
+        if (value === previous) {
+          db.exec('COMMIT');
+          return result;
+        }
         const nextCredentials=index(state);
-        write.run(JSON.stringify(state)); db.exec('COMMIT');
+        write.run(value); db.exec('COMMIT');
         credentials=nextCredentials;return result;
       } catch (e) { db.exec('ROLLBACK'); throw e; }
     },
     close: () => db.close(),
   };
+  return store;
 }

@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openStore } from '../registrations.js';
+import { DatabaseSync } from 'node:sqlite';
+import { DAY_SECONDS, openStore } from '../registrations.js';
 import { createApp } from '../app.js';
 import { createPoller } from '../poller.js';
 import { createSleeper, snapshot, score } from '../sleeper.js';
@@ -374,7 +375,7 @@ test('disabled invite enrollment does not access storage or invalidate existing 
   const id='b'.repeat(32),secret='c'.repeat(64);
   store.change(s=>s.devices[id]={hash:createHash('sha256').update(secret).digest('hex'),createdAt:T});
   let reads=0,writes=0;
-  const observed={credentialHash:store.credentialHash,read:()=>{reads++;return store.read();},change:fn=>{writes++;return store.change(fn);}};
+  const observed={...store,read:()=>{reads++;return store.read();},change:fn=>{writes++;return store.change(fn);}};
   const app=createApp({cfg:{...cfg,inviteEnabled:false,attestEnabled:true},store:observed,sleeper,now:()=>T*1000});
   const server=app.listen(0,'127.0.0.1');
   await new Promise(r=>server.on('listening',r));
@@ -916,4 +917,71 @@ test('nosniff is present on successful, rejected, malformed and rate-limited res
   const limited=await fixture(t,{cfg:{ingressGlobal:1,ingressPerIP:1}});
   await check(await limited.call('/v1/devices/me','GET',null,limited.token),200);
   await check(await limited.call('/v1/devices/me','GET',null,limited.token),429);
+});
+
+test('poller commits batched reservations before sending and skips writes on unchanged ticks',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'sleeper-batching-')), file=join(dir,'state.sqlite');
+  const store=openStore(file), observer=new DatabaseSync(file,{readOnly:true});
+  t.after(()=>{observer.close();store.close();rmSync(dir,{recursive:true});});
+  store.change(s=>{
+    for(let i=0;i<4;i++)s.activities[`a${i}`]=activity({id:`a${i}`});
+  });
+  const read=observer.prepare('SELECT value FROM state WHERE id=1');
+  const dataVersion=observer.prepare('PRAGMA data_version');
+  let time=T, transactions=0, sends=0;
+  const poll=createPoller({store:{...store,change(fn){transactions++;return store.change(fn);}},
+    sleeper,now:()=>time*1000,log:()=>{},transport:{send:async message=>{
+      sends++;
+      assert.ok(Object.values(JSON.parse(read.get().value).activities)
+        .every(a=>a.pushTimestamp===message.timestamp));
+      return {kind:'ok'};
+    }}});
+  await poll.tick();
+  assert.equal(sends,4);
+  assert.equal(transactions,3,'one housekeeping call, one reservation batch, one result batch');
+  assert.ok(Object.values(store.read().activities).every(a=>a.sentAt===T));
+  const before=dataVersion.get().data_version;
+  time+=75;
+  await poll.tick();
+  assert.equal(sends,4);
+  assert.equal(dataVersion.get().data_version,before,'unchanged tick does not update SQLite');
+});
+
+test('successful authenticated use updates lastSeenAt at most once daily',async t=>{
+  let time=T;
+  const f=await fixture(t,{now:()=>time*1000});
+  const id=f.token.split('.')[0], path='/v1/devices/me';
+  const seen=()=>f.store.read().devices[id].lastSeenAt;
+  assert.equal(seen(),T);
+  time+=DAY_SECONDS-1;
+  assert.equal((await f.call(path,'GET',null,f.token)).status,200);
+  assert.equal(seen(),T);
+  time++;
+  assert.equal((await f.call('/v1/activities/missing','GET',null,f.token)).status,404);
+  assert.equal((await f.call('/health')).status,200);
+  assert.equal(seen(),T);
+  assert.equal((await f.call(path,'GET',null,f.token)).status,200);
+  assert.equal(seen(),time);
+  time+=DAY_SECONDS;
+  assert.equal((await f.call(path,'DELETE',null,f.token)).status,204);
+  assert.equal(seen(),T+DAY_SECONDS,'revocation does not count as use');
+});
+
+test('inactivity reporting gives legacy devices a grace period and preserves all records',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  let time=T;
+  const idle={hash:'a',createdAt:T-120*DAY_SECONDS,lastSeenAt:T-60*DAY_SECONDS};
+  store.change(s=>{
+    s.devices={idle:{...idle},busy:{...idle},revoked:{...idle,revoked:true},legacy:{hash:'b',createdAt:idle.createdAt}};
+    s.activities.a=activity({deviceId:'busy',status:'awaiting_token',token:null});
+  });
+  const logs=[];
+  const poll=createPoller({store,sleeper,now:()=>time*1000,log:event=>logs.push(event)});
+  await poll.tick();
+  assert.equal(store.read().devices.legacy.lastSeenAt,T);
+  assert.equal(Object.keys(store.read().devices).length,4);
+  assert.deepEqual(logs,['event=device_idle_candidates count=1 idleDays=60']);
+  time+=75;
+  await poll.tick();
+  assert.equal(logs.length,1);
 });

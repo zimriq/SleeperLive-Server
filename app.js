@@ -61,7 +61,8 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
     const id=randomBytes(16).toString('hex'), secret=randomBytes(32).toString('hex');
     store.change(s=>{
       if(Object.values(s.devices).filter(d=>!d.revoked).length>=cfg.maxDevices)throw fail(503,'device_limit');
-      s.devices[id]={hash:hash(secret),createdAt:seconds()};
+      const at=seconds();
+      s.devices[id]={hash:hash(secret),createdAt:at,lastSeenAt:at};
     });
     res.status(201).json({deviceId:id,deviceToken:`${id}.${secret}`});
   });
@@ -69,6 +70,13 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
     // Recheck after body parsing: a concurrent request may have revoked the device.
     if(!req.deviceId||store.credentialHash(req.deviceId)!==req.credentialHash)
       return res.status(401).json({error:'unauthorized'});
+    if (req.method!=='DELETE' || !/^\/devices\/me(?:\/data)?\/?$/i.test(req.path)) {
+      res.once('finish',()=>{
+        if (res.statusCode<200 || res.statusCode>=300) return;
+        try { store.recordDeviceUse(req.deviceId,req.credentialHash,seconds()); }
+        catch(error) { errorLog('device_activity_write_failed',error); }
+      });
+    }
     next();
   });
   function identity(body,query=false){

@@ -102,7 +102,8 @@ export function enrollmentRouter({ cfg, store, limit, now, verify = verifyAppleA
       const devices = Object.values(state.devices);
       if (devices.some(d => d.attestKeyId === pending.keyId)) throw fail(409, 'key_already_registered');
       if (devices.filter(d => !d.revoked).length >= cfg.maxDevices) throw fail(503, 'device_limit');
-      state.devices[challengeId] = { hash: pending.credentialHash, createdAt: Math.floor(now() / 1000),
+      const at = Math.floor(now() / 1000);
+      state.devices[challengeId] = { hash: pending.credentialHash, createdAt: at, lastSeenAt: at,
         attestKeyId: pending.keyId, attestPublicKey: verified.publicKey,
         attestEnvironment: verified.environment };
     });

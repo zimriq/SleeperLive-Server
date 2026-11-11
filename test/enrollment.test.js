@@ -49,6 +49,7 @@ test('attested enrollment stores only a hash and retry returns same device witho
   const state = f.store.read();
   assert.equal(Object.keys(state.devices).length, 1);
   assert.equal(state.devices[c.challengeId].hash, hash(c.secret));
+  assert.equal(state.devices[c.challengeId].lastSeenAt, state.devices[c.challengeId].createdAt);
   assert.equal(JSON.stringify(state).includes(c.secret), false);
   assert.equal((await f.post('complete', {...body, attestation: Buffer.from('other-proof').toString('base64')})).status, 403);
   // Verify compatibility with the existing bearer-authenticated API.
