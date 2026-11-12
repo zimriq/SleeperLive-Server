@@ -1,4 +1,5 @@
-import { logInfo } from './logging.js';
+import { writeSync } from 'node:fs';
+import { logInfo, logError } from './logging.js';
 import { createHTTPServer } from './http-server.js';
 import { config } from './config.js';
 import { openStore } from './registrations.js';
@@ -14,12 +15,35 @@ const estimator=cfg.projections?createEstimator():undefined,transport=createAPNs
 const poller=createPoller({store,sleeper,transport,estimator,pollMs:cfg.pollMs,pushConcurrency:cfg.pushConcurrency,freshnessPriority:cfg.freshnessPriority});
 const app=createApp({cfg,store,sleeper,estimator,poller});
 const server=createHTTPServer(app).listen(cfg.port,()=>{logInfo(`SleeperLive listening on ${cfg.port}; APNs ${cfg.mode}`);poller.start();});
-let stopping=false;
-async function stop(){
-  if(stopping)return;stopping=true;
-  const timeout=setTimeout(()=>process.exit(1),25000);timeout.unref();
-  // Wait for in-flight HTTP requests before closing storage.
-  await Promise.all([new Promise(resolve=>server.close(resolve)),poller.stop()]);
-  transport.close();store.close();clearTimeout(timeout);
+let stopping = false;
+
+function fatal(event, error) {
+  // Flush diagnostics before exiting. A process with an uncaught exception is
+  // unsafe to keep running, including while waiting on an asynchronous drain.
+  try { logError(event,error,line=>writeSync(2,line+'\n')); }
+  finally { process.exit(1); }
 }
-process.on('SIGTERM',stop);process.on('SIGINT',stop);
+
+async function stop(signal) {
+  if (stopping) return;
+  stopping = true;
+  logInfo(`event=shutdown_started signal=${signal}`);
+  const timeout = setTimeout(()=>fatal('shutdown_timeout'),25000);
+  try {
+    const httpDrained = new Promise((resolve,reject)=>{
+      server.close(error=>error ? reject(error) : resolve());
+    });
+    await Promise.all([httpDrained,poller.stop()]);
+    transport.close();
+    store.close();
+    clearTimeout(timeout);
+    logInfo('event=shutdown_complete');
+  } catch(error) {
+    fatal('shutdown_failed',error);
+  }
+}
+
+process.on('SIGTERM',stop);
+process.on('SIGINT',stop);
+process.on('unhandledRejection',error=>fatal('unhandled_rejection',error));
+process.on('uncaughtException',error=>fatal('uncaught_exception',error));

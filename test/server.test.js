@@ -985,3 +985,38 @@ test('inactivity reporting gives legacy devices a grace period and preserves all
   await poll.tick();
   assert.equal(logs.length,1);
 });
+
+test('poller shutdown finishes active sends without starting queued or preparing pushes',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  store.change(s=>{
+    s.activities.a=activity({id:'a',token:'already-sending',status:'ending'});
+    s.activities.b=activity({id:'b',token:'preparing',pushTimestamp:0});
+    s.activities.c=activity({id:'c',token:'queued',pushTimestamp:0});
+  });
+  let releaseFeed,releaseSend;
+  const feedGate=new Promise(resolve=>{releaseFeed=resolve;});
+  const sendGate=new Promise(resolve=>{releaseSend=resolve;});
+  const sends=[];
+  const poll=createPoller({store,pushConcurrency:2,now:()=>T*1000,log:()=>{},
+    sleeper:{...sleeper,matchups:async()=>{await feedGate;return {rows,updatedAt:T};}},
+    transport:{send:async message=>{sends.push(message.token);await sendGate;return {kind:'ok'};}},
+  });
+  const tick=poll.tick();
+  try {
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(sends,['already-sending']);
+    let stopped=false;
+    const drain=poll.stop().then(()=>{stopped=true;});
+    releaseFeed();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(stopped,false,'the active push still owns its pending result');
+    releaseSend();
+    await drain;
+    const {activities}=store.read();
+    assert.equal(activities.a.status,'ended');
+    assert.equal(activities.b.pushTimestamp,0);
+    assert.equal(activities.c.pushTimestamp,0);
+    await poll.tick();
+    assert.deepEqual(sends,['already-sending']);
+  } finally {releaseFeed();releaseSend();await tick;}
+});

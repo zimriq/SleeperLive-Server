@@ -10,7 +10,7 @@ export function changed(a,b) {
 export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pushConcurrency=4,freshnessPriority=5,now=Date.now,log=logInfo,errorLog=logError}) {
   if(!Number.isInteger(pushConcurrency)||pushConcurrency<1||pushConcurrency>16)throw Error('Invalid push concurrency');
   if(![5,10].includes(freshnessPriority))throw Error('Invalid freshness priority');
-  let timer, running, stopped=true, nextIdleReport=0;
+  let timer, running, stopped=true, draining=false, nextIdleReport=0;
   const seconds=()=>Math.floor(now()/1000);
   const status={lastRunAt:null,lastError:null};
   const backoff = n=>Math.min(900,30*2**Math.min(n,5));
@@ -52,6 +52,7 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
     }
   }
   function reserve(activity,snap) {
+    if (draining) return;
     const t=seconds();
     if(activity.status==='ended' || activity.nextAttempt>t)return;
     if(activity.expiresAt<=t)activity.status='ending';
@@ -155,27 +156,49 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       const fetchGroup=groups.get(key);
       jobs.push(async()=>{
         const feeds=await fetchGroup();
-        if(!feeds)return;
+        if(draining || !feeds)return;
         const [data,meta]=feeds;
         await deliver(a.id,await snapshot(data,meta,a.rosterId,a.week,estimator));
       });
     }
     let cursor=0;
     const worker=async()=>{
-      while(cursor<jobs.length){
+      while(!draining && cursor<jobs.length){
         const job=jobs[cursor++];
         try{await job();}catch(error){errorLog('activity_update_failed',error);}
       }
     };
-    // Tick and shutdown wait for all workers; one slow send occupies only one slot.
+    // Active sends persist their results even when shutdown stops workers taking new jobs.
     await Promise.all(Array.from({length:Math.min(pushConcurrency,jobs.length)},worker));
     status.lastRunAt=seconds();
     status.lastError=null;
   }
   return {
-    tick(){if(running)return running;running=run().catch(e=>{status.lastError=e.message;errorLog('poll_failed',e);}).finally(()=>{running=null;});return running;},
-    start(){if(!stopped)return;stopped=false;const loop=async()=>{await this.tick();if(!stopped)timer=setTimeout(loop,pollMs);};timer=setTimeout(loop,0);},
-    async stop(){stopped=true;clearTimeout(timer);if(running)await running;},
+    tick() {
+      if (running) return running;
+      if (draining) return Promise.resolve();
+      running = run().catch(error=>{
+        status.lastError=error.message;
+        errorLog('poll_failed',error);
+      }).finally(()=>{running=null;});
+      return running;
+    },
+    start() {
+      if (!stopped) return;
+      draining=false;
+      stopped=false;
+      const loop=async()=>{
+        await this.tick();
+        if (!stopped) timer=setTimeout(loop,pollMs);
+      };
+      timer=setTimeout(loop,0);
+    },
+    async stop() {
+      draining=true;
+      stopped=true;
+      clearTimeout(timer);
+      if (running) await running;
+    },
     status:()=>({...status}),
   };
 }
