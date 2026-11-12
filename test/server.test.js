@@ -1020,3 +1020,12 @@ test('poller shutdown finishes active sends without starting queued or preparing
     assert.deepEqual(sends,['already-sending']);
   } finally {releaseFeed();releaseSend();await tick;}
 });
+
+test('production requires an explicit database path and local development keeps its default',()=>{
+  const env={INVITE_ENROLLMENT_ENABLED:'false'};
+  for (const DB_PATH of [undefined,'','   ']) {
+    assert.throws(()=>config({...env,NODE_ENV:'production',DB_PATH}),/Set DB_PATH explicitly/);
+  }
+  assert.equal(config({...env,NODE_ENV:'production',DB_PATH:'/data/server.sqlite'}).db,'/data/server.sqlite');
+  assert.equal(config(env).db,'./data/server.sqlite');
+});

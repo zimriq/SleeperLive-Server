@@ -1,5 +1,8 @@
 import { readFileSync } from 'node:fs';
 export function config(env = process.env) {
+  if (env.NODE_ENV === 'production' && !env.DB_PATH?.trim()) {
+    throw new Error('Set DB_PATH explicitly for production, using a persistent volume path.');
+  }
   const number = (key, fallback, min, max) => {
     const value = Number(env[key] ?? fallback);
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`Invalid ${key}`);
