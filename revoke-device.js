@@ -1,3 +1,4 @@
+import { endActivity } from './activities.js';
 import { logInfo } from './logging.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -14,8 +15,8 @@ export function revokeDevice(store, deviceId, {now=Date.now,log=logInfo}={}) {
     for(const [id,activity] of Object.entries(state.activities)){
       if(activity.deviceId!==deviceId)continue;
       if(activity.status==='awaiting_token'){
-        activity.status='ended';activity.endedReason='device_revoked';activity.endReason='device_revoked';
-        activity.endedAt=Math.floor(now()/1000);activity.token=null;delete activity.invalidTokenHash;delete activity.tokenLostAt;activity.version++;
+        endActivity(activity,'device_revoked',Math.floor(now()/1000));
+        activity.version++;
         log(`event=ended activity=${id.slice(0,8)} reason=device_revoked`);
       }
       if(activity.status==='active'){

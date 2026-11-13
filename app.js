@@ -1,3 +1,4 @@
+import { endActivity } from './activities.js';
 import { logInfo, logError } from './logging.js';
 import express from 'express';
 import { revokeDevice } from './revoke-device.js';
@@ -143,7 +144,13 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
     res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:a.endReason??a.endedReason??null,needsPushToken:a.status==='awaiting_token',endedReason:a.endedReason??a.endReason??null,endedAt:a.endedAt??null});
   });
   app.delete('/v1/activities/:id',(req,res)=>{
-    store.change(s=>{const a=ownActivity(s.activities,req.params.id);if(a?.deviceId===req.deviceId){a.status='ended';a.endReason='user_delete';a.endedReason='user_delete';a.endedAt=seconds();a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;a.version++;log(`event=ended activity=${a.id.slice(0,8)} reason=user_delete`);}});
+    store.change(s=>{
+      const activity=ownActivity(s.activities,req.params.id);
+      if(activity?.deviceId!==req.deviceId)return;
+      endActivity(activity,'user_delete',seconds());
+      activity.version++;
+      log(`event=ended activity=${activity.id.slice(0,8)} reason=user_delete`);
+    });
     res.status(204).end();
   });
   app.get('/v1/devices/me',(req,res)=>{
@@ -153,7 +160,9 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
   app.delete('/v1/devices/me/data',(req,res)=>{
     store.change(s=>{
       for(const [id,activity] of Object.entries(s.activities)){
-        if(activity.deviceId===req.deviceId){activity.status='ended';activity.endedReason='device_data_deleted';activity.endedAt=seconds();log(`event=ended activity=${id.slice(0,8)} reason=device_data_deleted`);delete s.activities[id];}
+        if(activity.deviceId!==req.deviceId)continue;
+        log(`event=ended activity=${id.slice(0,8)} reason=device_data_deleted`);
+        delete s.activities[id];
       }
       delete s.devices[req.deviceId];
     });

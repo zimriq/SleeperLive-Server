@@ -1,3 +1,4 @@
+import { endActivity } from './activities.js';
 import { DAY_SECONDS } from './registrations.js';
 import { logInfo, logError } from './logging.js';
 import { createHash } from 'node:crypto';
@@ -97,9 +98,9 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
           return `event=token_lost activity=${id.slice(0,8)} reason=${result.reason??'unknown'} status=${result.status??''}`;
         }
         if(result.kind==='dead' || (result.kind==='ok' && message.event==='end')) {
-          a.endedReason=a.endedReason??(result.kind==='dead'?'apns_unregistered':'end_push_accepted');a.endReason=a.endedReason;
-          a.status='ended';a.endedAt=completedAt;a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;
-          return `event=ended activity=${id.slice(0,8)} reason=${a.endedReason}`;
+          const reason=a.endedReason??(result.kind==='dead'?'apns_unregistered':'end_push_accepted');
+          endActivity(a,reason,completedAt);
+          return `event=ended activity=${id.slice(0,8)} reason=${reason}`;
         }
         if(result.kind==='ok'){
           a.state=message.state;a.sentState=message.state;a.sentAt=completedAt;
@@ -109,8 +110,7 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
         }
         a.failures=(a.failures??0)+1;a.nextAttempt=completedAt+backoff(a.failures);
         if(message.event==='end' && a.failures>=6){
-          a.status='ended';a.endedReason='end_push_failed';a.endReason=a.endedReason;
-          a.endedAt=completedAt;a.token=null;delete a.invalidTokenHash;delete a.tokenLostAt;
+          endActivity(a,'end_push_failed',completedAt);
           return `event=ended activity=${id.slice(0,8)} reason=end_push_failed`;
         }
       });
@@ -126,7 +126,10 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
         if(!device.revoked && !Number.isFinite(device.lastSeenAt)) device.lastSeenAt=at;
       }
       for(const [id,a] of Object.entries(s.activities)){
-        if(['active','ending','awaiting_token'].includes(a.status) && !a.token && a.expiresAt<=seconds()){a.status='ended';a.endedAt=seconds();a.endedReason='expired';a.endReason='expired';delete a.invalidTokenHash;delete a.tokenLostAt;log(`event=ended activity=${id.slice(0,8)} reason=expired`);}
+        if(['active','ending','awaiting_token'].includes(a.status) && !a.token && a.expiresAt<=seconds()){
+          endActivity(a,'expired',seconds());
+          log(`event=ended activity=${id.slice(0,8)} reason=expired`);
+        }
         if(a.status==='active' && a.expiresAt<=seconds()){a.status='ending';a.endedReason='expired';a.endReason='expired';}
         if(a.status==='ended' && seconds()-a.endedAt>86400)delete s.activities[id];
       }
@@ -201,9 +204,4 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
     },
     status:()=>({...status}),
   };
-}
-// Preserved convenience function from the original project.
-export async function fetchMatchups(leagueId,week){
-  const {getJSON}=await import('./sleeper.js');
-  return getJSON(`https://api.sleeper.app/v1/league/${leagueId}/matchups/${week}`);
 }
