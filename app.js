@@ -84,6 +84,9 @@ export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=l
   // Explicit erasure is separate from access revocation/replay protection.
   app.delete('/v1/devices/me/data',(req,res)=>{
     store.change(s=>{
+      // An operator can revoke this credential between authentication and BEGIN.
+      const device=s.devices[req.deviceId];
+      if (!device || device.revoked || device.hash!==req.credentialHash) throw fail(401,'unauthorized');
       for(const [id,activity] of Object.entries(s.activities)){
         if(activity.deviceId!==req.deviceId)continue;
         log(`event=ended activity=${id.slice(0,8)} reason=device_data_deleted`);

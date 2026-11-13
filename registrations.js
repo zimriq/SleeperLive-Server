@@ -9,7 +9,7 @@ export const DAY_SECONDS = 86400;
 export function openStore(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path);
-  db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+  db.exec(`PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
     CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
     INSERT OR IGNORE INTO state VALUES (1, '{"devices":{},"activities":{}}');`);
   const read = db.prepare('SELECT value FROM state WHERE id=1');
@@ -19,9 +19,23 @@ export function openStore(path) {
     if(entries.length>1000)throw Error('Active device index capacity exceeded');
     return new Map(entries.map(([id,device])=>[id,{hash:device.hash,lastSeenAt:device.lastSeenAt}]));
   };
-  let credentials=index(JSON.parse(read.get().value));
+  const dataVersion = path === ':memory:' ? null : db.prepare('PRAGMA data_version');
+  let indexedVersion = dataVersion?.get().data_version;
+  let credentials = index(JSON.parse(read.get().value));
+
+  function refreshCredentials() {
+    const version = dataVersion?.get().data_version;
+    if (version === indexedVersion) return;
+    credentials = index(JSON.parse(read.get().value));
+    indexedVersion = version;
+  }
   const store = {
-    credentialHash: id => credentials.get(id)?.hash,
+    credentialHash(id) {
+      // SQLite changes this value when another connection commits. Local writes
+      // already update the index after commit.
+      refreshCredentials();
+      return credentials.get(id)?.hash;
+    },
     recordDeviceUse(id, hash, at) {
       const due = device => device && !device.revoked && device.hash === hash
         && (!Number.isFinite(device.lastSeenAt) || at - device.lastSeenAt >= DAY_SECONDS);
