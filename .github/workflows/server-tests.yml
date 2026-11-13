@@ -29,6 +29,8 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --no-audit
+      - name: Lint server code
+        run: npm run lint
       - name: Run server tests
         run: npm test
       - name: Audit locked dependencies

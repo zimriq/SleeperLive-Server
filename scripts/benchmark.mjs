@@ -68,7 +68,7 @@ if (!process.argv.includes('--worker')) {
     const cpuStart=process.cpuUsage(),wallStart=performance.now(),samples=[],ticks=[];const delay=monitorEventLoopDelay({resolution:10});delay.enable();
     const sampler=setInterval(()=>samples.push(process.memoryUsage().rss),20);
     samples.push(process.memoryUsage().rss);
-    const baseRequests=apiRequests,baseFailures=apiFailures;
+    const baseFailures=apiFailures;
     if(idle) { await poller.tick();await new Promise(r=>setTimeout(r,10000)); }
     else for(cycle=0;cycle<360;cycle++){
       time+=75;

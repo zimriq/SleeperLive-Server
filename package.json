@@ -8,7 +8,8 @@
     "test": "node --test",
     "backup": "node --env-file-if-exists=.env backup.js",
     "test:load": "node scripts/benchmark.mjs",
-    "revoke-device": "node --env-file-if-exists=.env revoke-device.js"
+    "revoke-device": "node --env-file-if-exists=.env revoke-device.js",
+    "lint": "eslint . --max-warnings=0"
   },
   "keywords": [],
   "author": "",
@@ -21,5 +22,15 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.14.0",
+    "globals": "17.14.0"
+  },
+  "overrides": {
+    "eslint": {
+      "minimatch": "11.0.1"
+    }
   }
 }

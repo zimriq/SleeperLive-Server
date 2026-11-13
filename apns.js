@@ -19,7 +19,7 @@ export function createAPNs(cfg, now = Date.now, {
 } = {}) {
   for (const value of [requestTimeoutMs,sessionIdleMs])
     if (!Number.isInteger(value) || value<1) throw new Error('Invalid APNs timeout');
-  if (cfg.mode === 'dry-run') return { async send(message) { return {kind:'ok', dryRun:true}; }, close() {} };
+  if (cfg.mode === 'dry-run') return { async send() { return {kind:'ok', dryRun:true}; }, close() {} };
   function signer(pem, keyId) {
     const key = createPrivateKey(pem);
     if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error('APNs requires a P-256 private key');

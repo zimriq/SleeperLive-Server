@@ -24,7 +24,7 @@ async function fixture(t, options = {}) {
       if (input.attestation.toString() !== 'test-proof' || options.reject) throw Error('rejected');
       return { keyId: input.keyId, publicKey: 'test-only-public-key', environment: options.environment ?? 'production' };
     } }));
-  app.use((e, req, res, next) => res.status(e.status ?? 500).json({error: e.message}));
+  app.use((e, _req, res, _next) => res.status(e.status ?? 500).json({error: e.message}));
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); store.close(); });
