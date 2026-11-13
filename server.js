@@ -10,7 +10,15 @@ import { createPoller } from './poller.js';
 import { createApp } from './app.js';
 // Restrict newly created files to the service's operating-system user.
 process.umask(0o077);
-const cfg=config(),store=openStore(cfg.db),sleeper=createSleeper(undefined,Date.now,{maxActivities:cfg.maxActivities});
+const cfg = config();
+if (process.env.RAILWAY_ENVIRONMENT_NAME && cfg.clientIPMode === 'direct') {
+  console.warn(JSON.stringify({
+    level: 'warn',
+    event: 'railway_direct_client_ip',
+    message: 'Direct client IP mode can group callers behind Railway’s HTTP proxy. For traffic exclusively through the public HTTP edge, verify header handling before setting CLIENT_IP_MODE=railway-public.',
+  }));
+}
+const store=openStore(cfg.db),sleeper=createSleeper(undefined,Date.now,{maxActivities:cfg.maxActivities});
 const estimator=cfg.projections?createEstimator():undefined,transport=createAPNs(cfg);
 const poller=createPoller({store,sleeper,transport,estimator,pollMs:cfg.pollMs,pushConcurrency:cfg.pushConcurrency,freshnessPriority:cfg.freshnessPriority});
 const app=createApp({cfg,store,sleeper,estimator,poller});

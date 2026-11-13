@@ -28,11 +28,11 @@ const preload = `
   };
 `;
 
-async function fixture(t) {
+async function fixture(t, env = {}) {
   const invite='shutdown-test-invite-long-enough';
   const child=fork(new URL('../server.js',import.meta.url),[],{
     execArgv:['--import','data:text/javascript;base64,'+Buffer.from(preload).toString('base64')],
-    env:{APNS_MODE:'dry-run',DB_PATH:':memory:',INVITE_CODE:invite},
+    env:{APNS_MODE:'dry-run',DB_PATH:':memory:',INVITE_CODE:invite,...env},
     stdio:['ignore','pipe','pipe','ipc'],
   });
   const closed=once(child,'close');
@@ -86,3 +86,21 @@ for (const [message,event] of [['throw','uncaught_exception'],['reject','unhandl
     assert.equal(f.stderr().includes('private crash diagnostic'),false);
   });
 }
+
+test('Railway startup warns only when using direct client IP mode',{timeout:10000},async t=>{
+  for (const [env, shouldWarn] of [
+    [{RAILWAY_ENVIRONMENT_NAME:'develop'}, true],
+    [{RAILWAY_ENVIRONMENT_NAME:'develop',CLIENT_IP_MODE:'railway-public'}, false],
+    [{CLIENT_IP_MODE:'direct'}, false],
+  ]) {
+    const f=await fixture(t,env);
+    const response=await fetch(f.root+'/health',{headers:{connection:'close'}});
+    assert.equal(response.status,200);
+    await response.json();
+    f.child.kill('SIGTERM');
+    await f.draining;
+    f.child.send('release');
+    assert.deepEqual(await f.closed,[0,null]);
+    assert.equal(f.stderr().includes('"event":"railway_direct_client_ip"'),shouldWarn);
+  }
+});
