@@ -28,6 +28,8 @@ jobs:
           node-version: '24.22.3'
           cache: npm
       - name: Install locked dependencies
-        run: npm ci
+        run: npm ci --no-audit
       - name: Run server tests
         run: npm test
+      - name: Audit locked dependencies
+        run: npm audit --audit-level=high
