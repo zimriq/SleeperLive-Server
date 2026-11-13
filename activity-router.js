@@ -74,7 +74,8 @@ export function activityRouter({cfg,store,sleeper,estimator,now,log}) {
   });
   router.get('/v1/activities/:id',(req,res)=>{
     const a=ownActivity(store.read().activities,req.params.id);if(!a||a.deviceId!==req.deviceId)throw fail(404,'not_found');
-    res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:a.endReason??a.endedReason??null,needsPushToken:a.status==='awaiting_token',endedReason:a.endedReason??a.endReason??null,endedAt:a.endedAt??null});
+    const reason=a.endedReason??a.endReason??null;
+    res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:reason,needsPushToken:a.status==='awaiting_token',endedReason:reason,endedAt:a.endedAt??null});
   });
   router.delete('/v1/activities/:id',(req,res)=>{
     store.change(s=>{

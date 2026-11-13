@@ -241,7 +241,8 @@ registrations return 409 `activity_ended` before start-age validation; invalid
 start times for new registrations remain 400. Reasons are `expired`, `user_delete`,
 `device_revoked`, `device_data_deleted`, `apns_unregistered`, `end_push_accepted`,
 `end_push_failed`, and `matchup_final`. Data deletion removes the record, so its reason survives
-only in the sanitized event log. `endReason` remains as a compatibility alias.
+only in the sanitized event log. `endedReason` is the stored reason. Responses also include the compatibility
+alias `endReason`, and older records with either field remain readable.
 
 Routine application logs are JSON lines. Their `message` field uses
 `event=<name> activity=<first 8 characters> reason=<value>`; token-loss and

@@ -20,7 +20,7 @@ export function revokeDevice(store, deviceId, {now=Date.now,log=logInfo}={}) {
         log(`event=ended activity=${id.slice(0,8)} reason=device_revoked`);
       }
       if(activity.status==='active'){
-        activity.endedReason='device_revoked';activity.endReason='device_revoked';
+        activity.endedReason='device_revoked';delete activity.endReason;
         activity.status='ending';activity.version++;activity.nextAttempt=0;
         activitiesQueued++;
       }

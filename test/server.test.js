@@ -1104,3 +1104,26 @@ test('end dismissal defaults to fifteen minutes and supports an explicit interva
   assert.equal(payload(message,cfg.endDismissalSeconds).aps['dismissal-date'],T+600);
   assert.throws(()=>config({...env,END_DISMISSAL_SECONDS:'14401'}),/Invalid END_DISMISSAL_SECONDS/);
 });
+
+test('legacy end reasons are readable and a completed end writes only the canonical field',async t=>{
+  const f=await fixture(t);
+  const deviceId=f.token.split('.')[0];
+  f.store.change(s=>{
+    s.activities['legacy-end']=activity({id:'legacy-end',deviceId,status:'ending',endReason:'device_revoked'});
+  });
+  const path='/v1/activities/legacy-end';
+  const before=await(await f.call(path,'GET',null,f.token)).json();
+  assert.equal(before.endReason,'device_revoked');
+  assert.equal(before.endedReason,'device_revoked');
+
+  const poll=createPoller({store:f.store,now:()=>T*1000,log:()=>{},
+    transport:{send:async()=>({kind:'ok'})}});
+  await poll.tick();
+  const stored=f.store.read().activities['legacy-end'];
+  assert.equal(stored.status,'ended');
+  assert.equal(stored.endedReason,'device_revoked');
+  assert.equal(Object.hasOwn(stored,'endReason'),false);
+  const after=await(await f.call(path,'GET',null,f.token)).json();
+  assert.equal(after.endReason,'device_revoked');
+  assert.equal(after.endedReason,'device_revoked');
+});

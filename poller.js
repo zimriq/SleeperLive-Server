@@ -66,7 +66,7 @@ export function createPoller({store,sleeper,transport,estimator,gameStatus,pollM
     if (finish) {
       activity.status='ending';
       activity.endedReason='matchup_final';
-      activity.endReason='matchup_final';
+      delete activity.endReason;
       activity.state=snap.state;
     }
     const end=activity.status==='ending';
@@ -109,7 +109,7 @@ export function createPoller({store,sleeper,transport,estimator,gameStatus,pollM
           return `event=token_lost activity=${id.slice(0,8)} reason=${result.reason??'unknown'} status=${result.status??''}`;
         }
         if(result.kind==='dead' || (result.kind==='ok' && message.event==='end')) {
-          const reason=a.endedReason??(result.kind==='dead'?'apns_unregistered':'end_push_accepted');
+          const reason=a.endedReason??a.endReason??(result.kind==='dead'?'apns_unregistered':'end_push_accepted');
           endActivity(a,reason,completedAt);
           return `event=ended activity=${id.slice(0,8)} reason=${reason}`;
         }
@@ -143,7 +143,7 @@ export function createPoller({store,sleeper,transport,estimator,gameStatus,pollM
           endActivity(a,'expired',seconds());
           log(`event=ended activity=${id.slice(0,8)} reason=expired`);
         }
-        if(a.status==='active' && a.expiresAt<=seconds()){a.status='ending';a.endedReason='expired';a.endReason='expired';}
+        if(a.status==='active' && a.expiresAt<=seconds()){a.status='ending';a.endedReason='expired';delete a.endReason;}
         if(a.status==='ended' && seconds()-a.endedAt>86400)delete s.activities[id];
       }
     });

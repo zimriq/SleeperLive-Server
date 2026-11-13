@@ -1,6 +1,6 @@
 export function endActivity(activity, reason, endedAt) {
   activity.status = 'ended';
-  activity.endReason = reason;
+  delete activity.endReason;
   activity.endedReason = reason;
   activity.endedAt = endedAt;
   activity.token = null;
