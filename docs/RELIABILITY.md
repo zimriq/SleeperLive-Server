@@ -129,12 +129,11 @@ IP or global allowance. Accepted requests still count toward both shared ceiling
 429 responses include `Retry-After`; the ingress rejection also uses `no-store`.
 `/health` remains outside these budgets.
 
-`GET /health` is a public liveness check returning only `ok` and the APNs `mode`
-(`live` or `dry-run`), with `Cache-Control: no-store`. The iOS app uses these fields.
-It does not expose polling timestamps, raw errors, credentials, or database details.
-A successful response means the HTTP service is responding, not that the database,
-Sleeper feeds, polling loop, or Apple push delivery are healthy. It is not a
-readiness check and does not trigger database reads or upstream requests.
+`GET /health` returns `ok` and the APNs `mode` with
+`Cache-Control: no-store`. When more than three poll intervals pass without a
+completed tick, including the startup grace period, it returns 503 with `ok: false`. A tick can
+complete during an upstream outage, so check the push and upstream logs when
+diagnosing score delivery. The health route uses in-memory poller state.
 
 The downstream counters reserve separate capacity: 1,000 authenticated-device
 counters, 3,998 enrollment IP counters (shared by private and App Attest enrollment),

@@ -77,11 +77,11 @@ For the separate synthetic twelve-user benchmark:
 npm run test:load
 ```
 
-The benchmark writes `load-test-results.json`. It simulates upstream services and push delivery; it does not contact production. Historical measurements and methodology are in [Testing](docs/TESTING.md).
+The benchmark writes `data/load-test-results.json`. Run `npm run test:load -- --scale` for the 100- and 300-device scenarios. It simulates upstream services and push delivery; it does not contact production. Historical measurements and methodology are in [Testing](docs/TESTING.md).
 
 ## GitHub Actions
 
-The [Server tests workflow](.github/workflows/server-tests.yml) runs `npm ci` and `npm test` on Ubuntu with **Node.js 24**. The current local workflow runs on pushes to `main` and `develop`, pull requests targeting `main`, and manual dispatches.
+The [Server tests workflow](.github/workflows/server-tests.yml) runs lint, tests, and a dependency audit on Ubuntu with **Node.js 24.22.3**. It runs on pushes and pull requests targeting `main` or `develop`, and on manual dispatch.
 
 View the tested commit and pass/fail result in [Actions](https://github.com/zimriq/SleeperLive-Server/actions/workflows/server-tests.yml). This workflow tests code; it does not deploy or send real Apple pushes. The companion app has its own Xcode simulator workflow.
 
@@ -92,7 +92,7 @@ View the tested commit and pass/fail result in [Actions](https://github.com/zimr
 - A stale date indicates data freshness; neither urgent priority nor a successful APNs response guarantees timely phone delivery.
 - Invalidated tokens pause delivery until a replacement is registered. Activities expire eight hours after their original start.
 - SQLite storage and the in-memory credential index assume one process owns database writes. Independent replicas do not share state.
-- `/health` is a liveness endpoint, not proof that upstream feeds, polling, or push delivery are healthy.
+- `/health` checks that polling continues to complete. Use push logs to verify score delivery.
 - Projections are rough estimates based on external feeds, not official Sleeper live projections.
 
 Read [Reliability](docs/RELIABILITY.md) for exact limits, request safeguards, caching, and retry behavior.

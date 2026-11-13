@@ -2,7 +2,7 @@
 
 [Back to README](../README.md)
 
-## HTTP API and iOS integration
+## HTTP API
 
 Use HTTPS for remote connections. JSON uses camelCase. All dates are Int Unix seconds.
 Store device credentials in Keychain; never put the APNs signing key in the app.
@@ -24,9 +24,9 @@ POST /v1/devices
 Body: {"inviteCode":"the invite entered by the tester"}
 Response 201: {"deviceId":"...", "deviceToken":"..."}
 
-All following endpoints require Authorization: Bearer <deviceToken>.
-A 401 means reenrollment is needed. A 429 is rate-limited; honor Retry-After.
-Invite codes are for private tests. Automatic App Attest enrollment is described below.
+Matchup, activity, and current-device endpoints require
+`Authorization: Bearer <deviceToken>`. See [Error responses](#error-responses)
+for status codes and retry guidance. App Attest enrollment is described below.
 
 ### Initial and refreshed matchup
 
@@ -63,7 +63,12 @@ Use this same server state for the app and initial Activity content. For initial
 content also set staleDate to updatedAt + 360. The app can retain its existing
 Sleeper account/league/roster discovery; use this endpoint for the authoritative
 matchup display once connected. A missing opponent/upstream failure currently
-returns 503 matchup_unavailable; don't start an activity with no valid snapshot.
+returns 503 `matchup_unavailable`. The matchup route allows 10 requests per minute
+per device. The shared Sleeper client allows 60 actual fetches per minute across
+API requests and the poller. Cache hits are free. When that allowance runs out,
+the client reuses available cached feeds and preserves the original score timestamp.
+Clients should use `updatedAt` to decide whether a snapshot is fresh enough to start
+an activity.
 
 ### Register and rotate
 
@@ -99,7 +104,46 @@ phone delivery. To get freshly fetched scores, use GET /v1/matchup.
 
 End locally with ActivityKit, then DELETE /v1/activities/<id> (204, idempotent).
 Retry deletion if offline; server expiry bounds abandoned registrations.
-DELETE /v1/devices/me revokes this device and requests end pushes for its activities.
+`DELETE /v1/devices/me` revokes this device and requests end pushes for its
+activities. `DELETE /v1/devices/me/data` removes the device and its activity
+records from the active database. Both return 204 on success.
+
+### Health
+
+Public `GET /health` returns `{ "ok": true, "mode": "live" }` or the same shape
+with `mode: "dry-run"`. It returns 503 with `ok: false` when no poll tick has
+completed for more than three poll intervals, including the startup grace period.
+The check measures poller progress. Use delivery logs to diagnose push failures.
+
+### Error responses
+
+Application errors use `{ "error": "<code>" }`. The health route uses its own
+response shape described above. HTTP parser errors can occur before the app runs.
+
+- **400 Bad Request** — `invalid_matchup`, `invalid_activity`, `invalid_started_at`,
+  `invalid_enrollment`, `invalid_client_ip`, or `entity.parse.failed`. Correct the
+  input or proxy configuration before retrying.
+- **401 Unauthorized** — `unauthorized`. The saved credential is missing,
+  invalid, revoked, or deleted. Check the credential and offer explicit reconnect
+  when the device needs to enroll again.
+- **403 Forbidden** — `invalid_invite` or `invalid_attestation`. Check the invite
+  or restart verification as appropriate.
+- **404 Not Found** — `not_found`. The route is disabled or unknown, or the
+  requested activity is missing or belongs to another device.
+- **409 Conflict** — `activity_ended`, `identity_mismatch`, or
+  `key_already_registered`. Use a new activity or App Attest key as appropriate.
+- **410 Gone** — `challenge_expired`. Start a new App Attest enrollment.
+- **413 Content Too Large** — `entity.too.large`. General JSON is limited to 8 KiB
+  and enrollment JSON to 32 KiB.
+- **415 Unsupported Media Type** — `encoding.unsupported` or
+  `charset.unsupported`. Send uncompressed UTF-8 JSON.
+- **429 Too Many Requests** — `rate_limited`, `activity_limit`, or
+  `enrollment_busy`. Honor `Retry-After`. An activity cap also requires a slot
+  to become available.
+- **500 Internal Server Error** — `internal_error`. Check server logs for the
+  diagnostic.
+- **503 Service Unavailable** — `matchup_unavailable` or `device_limit`. Honor
+  `Retry-After` when retrying. A device cap also requires a slot to become available.
 
 ### Ordering and freshness
 
@@ -182,7 +226,7 @@ must be present together. Production activities select that signer when supplied
 otherwise the default signer is used. A signing key must support the requested
 APNs environment. Never include private keys in Git or the iOS app.
 
-## Recovery contract (develop, November 6, 2026)
+## Recovering push delivery
 
 `awaiting_token` registrations are paused, not ended. They do not fetch Sleeper
 or send pushes, still occupy device/global capacity, and expire at their original
@@ -199,13 +243,11 @@ start times for new registrations remain 400. Reasons are `expired`, `user_delet
 and `end_push_failed`. Data deletion removes the record, so its reason survives
 only in the sanitized event log. `endReason` remains as a compatibility alias.
 
-Events use `event=<name> activity=<first 8 characters> reason=<value>`; token-loss
-and push-result events can include APNs status. No push token, bearer credential,
+Routine application logs are JSON lines. Their `message` field uses
+`event=<name> activity=<first 8 characters> reason=<value>`; token-loss and
+push-result events can include APNs status. No push token, bearer credential,
 full activity ID, or device ID is emitted by these application events. Railway's
 incoming HTTP access logs are separate and may contain full URL paths.
 
-Deploy the server before an app build that depends on this recovery contract.
-The app main source checked locally does not GET/decode activity status; registration
-accepts any 2xx and ignores the response body. Exact approved/TestFlight binary
-provenance and physical-device compatibility still require verification. Dry-run
-cannot verify actual APNs delivery, token rotation, or locked-phone recovery.
+Deploy the server before distributing a client that relies on these response
+fields. Verify push delivery, token rotation, and recovery on a signed iPhone.

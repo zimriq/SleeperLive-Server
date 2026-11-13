@@ -1,6 +1,6 @@
 // Isolated benchmark: never loads .env, real Apple keys, live SQLite, or upstream APIs.
 import { fork } from 'node:child_process';
-import { mkdtempSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir, platform, arch, cpus } from 'node:os';
 import { join } from 'node:path';
 import { performance, monitorEventLoopDelay } from 'node:perf_hooks';
@@ -27,7 +27,11 @@ if (!process.argv.includes('--worker')) {
     });
     results.push(result);console.log(JSON.stringify(result));
   }
-  if(!scale)writeFileSync(new URL('../load-test-results.json',import.meta.url),JSON.stringify({recordedAt:new Date().toISOString(),platform:platform(),arch:arch(),cpu:cpus()[0].model,node:process.version,simulatedSecondsPerCycle:75,cycles:360,users:12,projections:false,results},null,2)+'\n');
+  if(!scale) {
+    const outputDir=new URL('../data/',import.meta.url);
+    mkdirSync(outputDir,{recursive:true});
+    writeFileSync(new URL('load-test-results.json',outputDir),JSON.stringify({recordedAt:new Date().toISOString(),platform:platform(),arch:arch(),cpu:cpus()[0].model,node:process.version,simulatedSecondsPerCycle:75,cycles:360,users:12,projections:false,results},null,2)+'\n');
+  }
 } else {
   const name=process.argv.at(-1), idle=name==='idle', faults=name.endsWith('outages'), shared=name==='shared-league';
   const scenario=scaleScenarios[name];

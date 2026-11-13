@@ -44,20 +44,22 @@ silently restored. No real backup cleanup was run while developing this feature.
 ## Device revocation
 
 Users can revoke their current credential through authenticated
-`DELETE /v1/devices/me`. Operators can revoke a device without its bearer token
-using `npm run revoke-device -- --server-stopped <32-character-device-id>`.
+`DELETE /v1/devices/me`. Operators can revoke a credential from the service
+container using its existing `DB_PATH`:
 
-The operator command is **offline only**: stop the server process first, back up
-its database, explicitly set `DB_PATH` to that existing database, run the command,
-and restart the server. `--server-stopped` is an operator acknowledgement, not a
-process detector. Never run it against a database used by a live server: the
-running credential index would remain stale. A restarted server rebuilds the
-index and rejects the revoked credential. Do not copy database contents or tokens
-into chat or logs; the command prints only a result and activity count.
+```bash
+npm run revoke-device -- --live <32-character-device-id>
+```
+
+Use `--live` after deploying a server version that refreshes its credential
+index when another SQLite connection commits. The next authenticated lookup
+then rejects the old credential. The poller handles queued end pushes on its
+next tick. Use `--server-stopped` with older server versions or when operating
+on a stopped instance. Keep the database and device credentials private.
 
 Revocation retains the device/attestation-key record to block key reuse, and queues
-owned active Live Activities for end pushes. Pushes are attempted after restart;
-Apple acceptance or immediate disappearance from the phone is not guaranteed.
+owned active Live Activities for end pushes. Apple acceptance and delivery to
+the phone are separate events.
 Other devices are unaffected. Repeated revocation is safe. This revokes one device
 credential, not a Sleeper username or a person's ability to enroll a different key.
 No public administration endpoint or automatic device-record deletion is introduced.
@@ -68,9 +70,9 @@ on the next normal write (such as poller housekeeping). Active device records ar
 unchanged. Revoked device IDs, attestation key IDs, and revocation flags remain to
 prevent key reuse; pending activity end tokens remain until their lifecycle finishes.
 This is logical data minimization, not secure erasure: older SQLite pages, WAL files,
-and backups can retain previous values. No automatic deletion of replay-blocking
-records or age-based expiration of active devices is performed. Long-term retention
-and growth of those records still need an explicit policy.
+and backups can retain previous values. The poller reports daily counts of non-revoked devices idle for at least 60 days
+with no non-ended activities. The report is observational. Reclamation remains
+a separate rollout decision.
 
 ## User-initiated device-data deletion
 
