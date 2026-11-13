@@ -1,8 +1,8 @@
 import http2 from 'node:http2';
 import { createPrivateKey, sign } from 'node:crypto';
-export function payload(message) {
+export function payload(message, endDismissalSeconds = 900) {
   return { aps: { timestamp: message.timestamp, event: message.event, 'content-state': message.state,
-    ...(message.event === 'end' ? {'dismissal-date': message.timestamp + 900} : {'stale-date': message.state.updatedAt + 360}) } };
+    ...(message.event === 'end' ? {'dismissal-date': message.timestamp + endDismissalSeconds} : {'stale-date': message.state.updatedAt + 360}) } };
 }
 export function pushPriority(message) {
   return message.event === 'end' || message.priority === 10 ? '10' : '5';
@@ -65,7 +65,7 @@ export function createAPNs(cfg, now = Date.now, {
   }
   return {
     async send(message) {
-      const body = JSON.stringify(payload(message));
+      const body = JSON.stringify(payload(message,cfg.endDismissalSeconds));
       if (Buffer.byteLength(body)>4096) return observe(message.env,{kind:'retry',reason:'PayloadTooLarge'});
       try {
         const result = await new Promise(resolve => {

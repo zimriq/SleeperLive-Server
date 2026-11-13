@@ -79,7 +79,7 @@ export function activityRouter({cfg,store,sleeper,estimator,now,log}) {
   router.delete('/v1/activities/:id',(req,res)=>{
     store.change(s=>{
       const activity=ownActivity(s.activities,req.params.id);
-      if(activity?.deviceId!==req.deviceId)return;
+      if(activity?.deviceId!==req.deviceId || activity.status==='ended')return;
       endActivity(activity,'user_delete',seconds());
       activity.version++;
       log(`event=ended activity=${activity.id.slice(0,8)} reason=user_delete`);

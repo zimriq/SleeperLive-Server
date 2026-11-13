@@ -82,8 +82,19 @@ outgrows its limit, inspect its size and adjust deliberately.
   not confirmation that the phone displayed the update.
 - End locally in the app, then DELETE the registration. Server also expires it eight
   hours after its actual start. A Sunday activity must be restarted for Monday.
-- No automatic game-final ending yet. Final scores may receive heartbeat pushes
-  until expiry or the user ends the activity.
+- Set `ENABLE_AUTO_END=true` on develop to trial automatic endings independently
+  of estimates. The poller uses the regular-season scoreboard and Sleeper player
+  catalog to confirm that both lineups' occupied starter slots map to final games
+  or explicit byes. Missing or uncertain game data leaves the normal expiry in place.
+- Once completion is confirmed, the poller needs two consecutive unchanged
+  comparisons between fresh score polls, or a fresh score at least ten minutes
+  after it first observed continuous completion. A previously completed week
+  follows the same checks. The end push carries the latest score snapshot and
+  logs `event=auto_end` with `reason=matchup_final` when queued.
+- `END_DISMISSAL_SECONDS` defaults to 900 (15 minutes) and accepts 0–14,400
+  seconds. It sets the requested Lock Screen dismissal time on end pushes.
+  Verify the end push, final score, and dismissal on a signed iPhone through a
+  real game window on develop before enabling this feature in production.
 - Once sent, the network may still deliver a push after the user ends locally;
   the server prevents subsequent work for ended activities.
 - At-least-once retry: a crash between Apple accepting a push and the database

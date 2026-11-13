@@ -23,6 +23,8 @@ export function config(env = process.env) {
   if(![5,10].includes(freshnessPriority))throw Error('Invalid APNS_FRESHNESS_PRIORITY');
   const c = {
     freshnessPriority,
+    autoEnd: flag('ENABLE_AUTO_END'),
+    endDismissalSeconds: number('END_DISMISSAL_SECONDS', 900, 0, 14400),
     port: number('PORT', 3000, 1, 65535), db: env.DB_PATH ?? './data/server.sqlite',
     attestEnabled, inviteEnabled, clientIPMode,
     attestAllowDevelopment: flag('APP_ATTEST_ALLOW_DEVELOPMENT'),

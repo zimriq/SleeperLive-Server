@@ -2,18 +2,19 @@ import { endActivity } from './activities.js';
 import { DAY_SECONDS } from './registrations.js';
 import { logInfo, logError } from './logging.js';
 import { createHash } from 'node:crypto';
-import { snapshot } from './sleeper.js';
+import { sides, snapshot } from './sleeper.js';
 export function changed(a,b) {
   if (!a) return true;
   return ['yourScore','opponentScore','yourProjectionKind','opponentProjectionKind'].some(k=>a[k]!==b[k]) ||
     ['yourProjected','opponentProjected'].some(k=>(a[k]===null)!==(b[k]===null) || (a[k]!==null && Math.abs(a[k]-b[k])>=0.5));
 }
-export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pushConcurrency=4,freshnessPriority=5,now=Date.now,log=logInfo,errorLog=logError}) {
+export function createPoller({store,sleeper,transport,estimator,gameStatus,pollMs=75000,pushConcurrency=4,freshnessPriority=5,now=Date.now,log=logInfo,errorLog=logError}) {
   if(!Number.isInteger(pushConcurrency)||pushConcurrency<1||pushConcurrency>16)throw Error('Invalid push concurrency');
   if(![5,10].includes(freshnessPriority))throw Error('Invalid freshness priority');
   let timer, running, stopped=true, draining=false, nextIdleReport=0;
   const seconds=()=>Math.floor(now()/1000);
   const status={lastRunAt:null,lastError:null};
+  let finalScores = new Map();
   const backoff = n=>Math.min(900,30*2**Math.min(n,5));
   // Coalesce ready workers in the same turn. Each worker still waits for its own
   // commit, and a stalled request never delays another worker's result.
@@ -52,12 +53,22 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       catch(error) { item.reject(error); }
     }
   }
-  function reserve(activity,snap) {
+  function reserve(activity,snap,autoEnd) {
     if (draining) return;
     const t=seconds();
     if(activity.status==='ended' || activity.nextAttempt>t)return;
     if(activity.expiresAt<=t)activity.status='ending';
     if(activity.status==='awaiting_token' || !activity.token)return;
+    if((activity.pushTimestamp??0)>=t)return;
+    const finish = autoEnd && activity.status==='active'
+      && activity.version===autoEnd.version && activity.deviceId===autoEnd.deviceId
+      && activity.startedAt===autoEnd.startedAt && snap.state.updatedAt>=activity.state.updatedAt;
+    if (finish) {
+      activity.status='ending';
+      activity.endedReason='matchup_final';
+      activity.endReason='matchup_final';
+      activity.state=snap.state;
+    }
     const end=activity.status==='ending';
     if(!end && !snap)return;
     if(!end && snap.state.updatedAt<activity.state.updatedAt)return;
@@ -66,22 +77,22 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
       : (activity.sentAt??activity.startedAt);
     const heartbeatDue=t-freshnessBaseline>=180;
     if(!end && !activity.force && !changed(activity.sentState,snap.state) && !heartbeatDue)return;
-    if((activity.pushTimestamp??0)>=t)return;
     const baseline=activity.sentState??activity.state;
     const scoreChanged=!end && (baseline.yourScore!==snap.state.yourScore || baseline.opponentScore!==snap.state.opponentScore);
     const recovery=activity.force || !activity.sentState;
     activity.pushTimestamp=t;
-    return {version:activity.version,deviceId:activity.deviceId,message:{
+    return {autoEnded:finish,version:activity.version,deviceId:activity.deviceId,message:{
       token:activity.token,env:activity.env,event:end?'end':'update',timestamp:t,
       priority:end||scoreChanged||recovery?10:heartbeatDue?freshnessPriority:5,
       cause:end?'end':scoreChanged?'score':recovery?'recovery':heartbeatDue?'heartbeat':'projection',
       state:end?activity.state:snap.state,
     }};
   }
-  async function deliver(id,snap) {
-    return changeActivity(id,activity=>reserve(activity,snap),async reservation=>{
+  async function deliver(id,snap,autoEnd) {
+    return changeActivity(id,activity=>reserve(activity,snap,autoEnd),async reservation=>{
       if (!reservation) return;
       const {message,version,deviceId}=reservation;
+      if (reservation.autoEnded) log(`event=auto_end activity=${id.slice(0,8)} reason=matchup_final`);
       const attemptAt=seconds();
       log(`event=push_attempt activity=${id.slice(0,8)} reason=${message.cause} priority=${message.priority} timestamp=${message.timestamp} updatedAt=${message.state.updatedAt} staleAt=${message.event==='end'?'none':message.state.updatedAt+360}`);
       let result;
@@ -121,6 +132,8 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
   }
   async function run(){
     const at=seconds();
+    const previousFinalScores=finalScores;
+    finalScores=new Map();
     store.change(s=>{
       for(const device of Object.values(s.devices)) {
         if(!device.revoked && !Number.isFinite(device.lastSeenAt)) device.lastSeenAt=at;
@@ -161,7 +174,22 @@ export function createPoller({store,sleeper,transport,estimator,pollMs=75000,pus
         const feeds=await fetchGroup();
         if(draining || !feeds)return;
         const [data,meta]=feeds;
-        await deliver(a.id,await snapshot(data,meta,a.rosterId,a.week,estimator));
+        const snap=await snapshot(data,meta,a.rosterId,a.week,estimator);
+        let autoEnd;
+        if (gameStatus && !draining && await gameStatus(meta.info,a.week,sides(data.rows,a.rosterId))) {
+          const previous=previousFinalScores.get(a.id);
+          const sameActivity=previous?.deviceId===a.deviceId && previous.startedAt===a.startedAt;
+          const prior=sameActivity?previous:undefined;
+          const fresh=snap.state.updatedAt>=at && (!prior || snap.state.updatedAt>prior.updatedAt);
+          const sameScore=prior?.yourScore===snap.state.yourScore && prior.opponentScore===snap.state.opponentScore;
+          const confirmedAt=prior?.confirmedAt??at;
+          const stablePolls=fresh && sameScore && prior.fresh?prior.stablePolls+1:0;
+          finalScores.set(a.id,{deviceId:a.deviceId,startedAt:a.startedAt,confirmedAt,
+            updatedAt:snap.state.updatedAt,yourScore:snap.state.yourScore,
+            opponentScore:snap.state.opponentScore,stablePolls,fresh});
+          if (fresh && (stablePolls>=2 || at-confirmedAt>=600)) autoEnd=a;
+        }
+        await deliver(a.id,snap,autoEnd);
       });
     }
     let cursor=0;

@@ -1029,3 +1029,78 @@ test('production requires an explicit database path and local development keeps 
   assert.equal(config({...env,NODE_ENV:'production',DB_PATH:'/data/server.sqlite'}).db,'/data/server.sqlite');
   assert.equal(config(env).db,'./data/server.sqlite');
 });
+
+test('auto-end waits for fresh stable scores, sends the latest state, and keeps the end reason after cleanup',async t=>{
+  let time=T,points=10,updatedAt=T,allFinal=false;
+  const f=await fixture(t,{now:()=>time*1000});
+  assert.equal((await f.call('/v1/activities/auto-end','PUT',registration,f.token)).status,201);
+  const messages=[],logs=[];
+  const poll=createPoller({store:f.store,now:()=>time*1000,log:line=>logs.push(line),
+    sleeper:{...sleeper,matchups:async()=>({rows:[{...rows[0],points},rows[1]],updatedAt})},
+    gameStatus:async()=>allFinal,
+    transport:{send:async message=>{messages.push(message);return {kind:'ok'};}},
+  });
+  const tick=async({fresh=true}={})=>{time+=75;if(fresh)updatedAt=time;await poll.tick();};
+  await tick();
+  allFinal=true;
+  await tick();
+  await tick({fresh:false});
+  points=15;
+  await tick();
+  await tick();
+  assert.equal(messages.some(m=>m.event==='end'),false);
+  await tick();
+  assert.equal(messages.at(-1).event,'end');
+  assert.equal(messages.at(-1).state.yourScore,15);
+  assert.equal(messages.at(-1).state.updatedAt,time);
+  assert.equal(logs.filter(line=>line.includes('event=auto_end')).length,1);
+  assert.equal((await f.call('/v1/activities/auto-end','DELETE',null,f.token)).status,204);
+  const response=await f.call('/v1/activities/auto-end','GET',null,f.token);
+  const ended=await response.json();
+  assert.equal(ended.status,'ended');
+  assert.equal(ended.endedReason,'matchup_final');
+  assert.equal(ended.state.yourScore,15);
+});
+
+test('auto-end ten-minute fallback waits for a fresh score and retries the final end payload',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  store.change(s=>{s.activities.a=activity({id:'a'});});
+  const messages=[];
+  let time=T,updatedAt=T,points=0,endAttempts=0;
+  const poll=createPoller({store,now:()=>time*1000,log:()=>{},
+    sleeper:{...sleeper,matchups:async()=>({rows:[{...rows[0],points},rows[1]],updatedAt})},
+    gameStatus:async()=>true,
+    transport:{send:async message=>{
+      messages.push(message);
+      return {kind:message.event==='end' && ++endAttempts===1?'retry':'ok'};
+    }},
+  });
+  await poll.tick();
+  for(let i=1;i<=8;i++) {
+    time+=75;points=i;
+    if(i<8)updatedAt=time;
+    await poll.tick();
+  }
+  assert.equal(endAttempts,0,'an old cache timestamp cannot trigger an end');
+  time+=75;updatedAt=time;points=12;
+  await poll.tick();
+  assert.equal(endAttempts,1);
+  assert.equal(store.read().activities.a.status,'ending');
+  time+=75;
+  await poll.tick();
+  assert.equal(endAttempts,2);
+  assert.equal(messages.at(-1).state.yourScore,12);
+  assert.equal(store.read().activities.a.endedReason,'matchup_final');
+});
+
+test('end dismissal defaults to fifteen minutes and supports an explicit interval',()=>{
+  const env={INVITE_ENROLLMENT_ENABLED:'false'};
+  assert.equal(config(env).autoEnd,false);
+  assert.equal(config(env).endDismissalSeconds,900);
+  const cfg=config({...env,ENABLE_AUTO_END:'true',END_DISMISSAL_SECONDS:'600'});
+  assert.equal(cfg.autoEnd,true);
+  const message={event:'end',timestamp:T,state:{updatedAt:T}};
+  assert.equal(payload(message).aps['dismissal-date'],T+900);
+  assert.equal(payload(message,cfg.endDismissalSeconds).aps['dismissal-date'],T+600);
+  assert.throws(()=>config({...env,END_DISMISSAL_SECONDS:'14401'}),/Invalid END_DISMISSAL_SECONDS/);
+});

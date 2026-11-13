@@ -240,7 +240,7 @@ GET `/v1/activities/:id` retains all prior fields and adds `needsPushToken`,
 registrations return 409 `activity_ended` before start-age validation; invalid
 start times for new registrations remain 400. Reasons are `expired`, `user_delete`,
 `device_revoked`, `device_data_deleted`, `apns_unregistered`, `end_push_accepted`,
-and `end_push_failed`. Data deletion removes the record, so its reason survives
+`end_push_failed`, and `matchup_final`. Data deletion removes the record, so its reason survives
 only in the sanitized event log. `endReason` remains as a compatibility alias.
 
 Routine application logs are JSON lines. Their `message` field uses
