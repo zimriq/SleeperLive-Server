@@ -1,0 +1,389 @@
+openapi: 3.1.0
+info:
+  title: SleeperLive Server
+  version: 1.0.0
+  description: >
+    API for device enrollment, matchup scores, and Live Activity registrations.
+    Use HTTPS when connecting remotely. See API.md for enrollment and lifecycle guidance.
+servers:
+  - url: http://localhost:3000
+    description: Local development
+  - url: https://sleeperlive-server-develop.up.railway.app
+    description: Railway development
+security:
+  - deviceBearer: []
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Check server and poller progress
+      security: []
+      responses:
+        '200':
+          description: Healthy, including during the poller's startup grace period
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+              example: { ok: true, mode: dry-run }
+        '503':
+          description: Polling has not completed for more than three intervals
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+              example: { ok: false, mode: live }
+  /v1/devices:
+    post:
+      operationId: enrollWithInvite
+      summary: Register with a private testing invitation
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inviteCode]
+              properties:
+                inviteCode: { type: string, writeOnly: true }
+      responses:
+        '201':
+          description: Device registered
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InviteRegistration' }
+        '403':
+          description: invalid_invite
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/enrollment/challenge:
+    post:
+      operationId: createEnrollmentChallenge
+      summary: Request a five-minute App Attest challenge
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keyId, credentialHash]
+              properties:
+                keyId:
+                  type: string
+                  pattern: '^[A-Za-z0-9+/]{43}=$'
+                  description: Canonical base64 encoding of the 32-byte App Attest key ID
+                credentialHash:
+                  type: string
+                  pattern: '^[a-f0-9]{64}$'
+                  description: SHA-256 of the UTF-8 lowercase hex device secret
+      responses:
+        '201':
+          description: Challenge created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Challenge' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/enrollment/complete:
+    post:
+      operationId: completeEnrollment
+      summary: Verify App Attest and register the device
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeId, attestation]
+              properties:
+                challengeId: { $ref: '#/components/schemas/DeviceId' }
+                attestation:
+                  type: string
+                  minLength: 4
+                  maxLength: 28000
+                  contentEncoding: base64
+                  writeOnly: true
+      responses:
+        '200':
+          description: Exact completion retry within the challenge window
+          content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
+        '201':
+          description: Device registered
+          content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403':
+          description: invalid_attestation
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410':
+          description: challenge_expired
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/devices/me:
+    get:
+      operationId: getDevice
+      summary: Verify the current registration
+      responses:
+        '200':
+          description: Current device
+          headers:
+            Cache-Control: { schema: { const: no-store } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: revokeDevice
+      summary: Revoke the current credential and queue activity endings
+      responses:
+        '204': { description: Device revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/devices/me/data:
+    delete:
+      operationId: deleteDeviceData
+      summary: Remove the device and its activities from the active database
+      responses:
+        '204': { description: Device data deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/matchup:
+    get:
+      operationId: getMatchup
+      summary: Get the current score snapshot for a roster
+      description: Limited to 10 requests per device per minute. Cached data retains its original score timestamp.
+      parameters:
+        - name: leagueId
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/LeagueId' }
+        - name: week
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Week' }
+        - name: rosterId
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/RosterId' }
+      responses:
+        '200':
+          description: Matchup snapshot
+          content: { application/json: { schema: { $ref: '#/components/schemas/Snapshot' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/activities/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: registerActivity
+      summary: Register an activity or update its push token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivityRegistration' }
+      responses:
+        '200':
+          description: Existing registration. needsPushToken is true when the supplied token still needs replacement.
+          content: { application/json: { schema: { $ref: '#/components/schemas/RegisteredActivity' } } }
+        '201':
+          description: New registration
+          content: { application/json: { schema: { $ref: '#/components/schemas/RegisteredActivity' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/Error' }
+    get:
+      operationId: getActivity
+      summary: Read the activity's registration and last accepted state
+      responses:
+        '200':
+          description: Activity status and score snapshot
+          content: { application/json: { schema: { $ref: '#/components/schemas/Activity' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: endActivity
+      summary: End an activity owned by the current device
+      responses:
+        '204': { description: 'Idempotent completion, including if the activity is absent or already ended' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    deviceBearer:
+      type: http
+      scheme: bearer
+      description: The opaque device token in deviceId.secret form
+  headers:
+    RetryAfter:
+      description: Suggested wait in seconds
+      schema: { type: integer, minimum: 1 }
+  responses:
+    Error:
+      description: Application error, including malformed, oversized, or unsupported request bodies
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    BadRequest:
+      description: Invalid input, JSON, or client IP
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Missing, invalid, revoked, or deleted device credential
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Disabled route or unavailable activity
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Conflict:
+      description: Activity ended, identity mismatch, or App Attest key already registered
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: Request budget, activity capacity, or enrollment capacity reached
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unavailable:
+      description: Matchup data unavailable or device capacity reached
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Health:
+      type: object
+      required: [ok, mode]
+      properties:
+        ok: { type: boolean }
+        mode: { enum: [dry-run, live] }
+    DeviceId:
+      type: string
+      pattern: '^[a-f0-9]{32}$'
+    Device:
+      type: object
+      required: [deviceId]
+      properties:
+        deviceId: { $ref: '#/components/schemas/DeviceId' }
+    InviteRegistration:
+      allOf:
+        - $ref: '#/components/schemas/Device'
+        - type: object
+          required: [deviceToken]
+          properties:
+            deviceToken: { type: string, pattern: '^[a-f0-9]{32}\.[a-f0-9]{64}$' }
+    UnixSeconds:
+      type: integer
+      description: Unix timestamp in seconds
+    Challenge:
+      type: object
+      required: [challengeId, challenge, expiresAt]
+      properties:
+        challengeId: { $ref: '#/components/schemas/DeviceId' }
+        challenge: { type: string, contentEncoding: base64 }
+        expiresAt: { $ref: '#/components/schemas/UnixSeconds' }
+    LeagueId:
+      type: string
+      pattern: '^[0-9]{6,25}$'
+    Week:
+      type: integer
+      minimum: 1
+      maximum: 18
+    RosterId:
+      type: integer
+      minimum: 1
+      maximum: 100
+    Attributes:
+      type: object
+      required: [leagueName, yourName, opponentName, week]
+      properties:
+        leagueName: { type: string }
+        yourName: { type: string }
+        opponentName: { type: string }
+        week: { $ref: '#/components/schemas/Week' }
+    ProjectionKind:
+      enum: [estimate, final, unavailable]
+    ScoreState:
+      type: object
+      required: [yourScore, opponentScore, yourProjected, opponentProjected, yourProjectionKind, opponentProjectionKind, updatedAt]
+      properties:
+        yourScore: { type: number }
+        opponentScore: { type: number }
+        yourProjected: { type: [number, 'null'] }
+        opponentProjected: { type: [number, 'null'] }
+        yourProjectionKind: { $ref: '#/components/schemas/ProjectionKind' }
+        opponentProjectionKind: { $ref: '#/components/schemas/ProjectionKind' }
+        updatedAt: { $ref: '#/components/schemas/UnixSeconds' }
+    Snapshot:
+      type: object
+      required: [attributes, state]
+      properties:
+        attributes: { $ref: '#/components/schemas/Attributes' }
+        state: { $ref: '#/components/schemas/ScoreState' }
+    ActivityRegistration:
+      type: object
+      required: [leagueId, week, rosterId, pushToken, apnsEnvironment, startedAt]
+      properties:
+        leagueId: { $ref: '#/components/schemas/LeagueId' }
+        week: { $ref: '#/components/schemas/Week' }
+        rosterId: { $ref: '#/components/schemas/RosterId' }
+        pushToken: { type: string, pattern: '^([a-fA-F0-9]{2}){16,256}$', writeOnly: true }
+        apnsEnvironment: { enum: [development, production] }
+        startedAt: { $ref: '#/components/schemas/UnixSeconds' }
+        refresh:
+          type: boolean
+          description: Request another delivery and reset backoff after an intentional refresh
+    RegisteredActivity:
+      type: object
+      required: [activityId, expiresAt]
+      properties:
+        activityId: { type: string }
+        expiresAt: { $ref: '#/components/schemas/UnixSeconds' }
+        needsPushToken: { type: boolean }
+    Activity:
+      allOf:
+        - $ref: '#/components/schemas/Snapshot'
+        - type: object
+          required: [activityId, status, expiresAt, lastAcceptedAt, needsPushToken, endReason, endedReason, endedAt]
+          properties:
+            activityId: { type: string }
+            status: { enum: [active, awaiting_token, ending, ended] }
+            expiresAt: { $ref: '#/components/schemas/UnixSeconds' }
+            lastAcceptedAt: { type: [integer, 'null'] }
+            needsPushToken: { type: boolean }
+            endReason:
+              type: [string, 'null']
+              description: Compatibility alias for endedReason
+            endedReason: { type: [string, 'null'] }
+            endedAt: { type: [integer, 'null'] }

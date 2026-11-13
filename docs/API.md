@@ -1,6 +1,6 @@
 # API and app integration
 
-[Back to README](../README.md)
+[Back to README](../README.md) · [OpenAPI 3.1 specification](openapi.yaml)
 
 ## HTTP API
 
