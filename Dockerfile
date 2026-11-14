@@ -3,6 +3,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY *.js ./
+COPY scripts/benchmark-store.mjs ./scripts/
 ENV NODE_ENV=production
 # Set to node after verifying access to the mounted SQLite database.
 ARG SLEEPERLIVE_RUNTIME_USER=root

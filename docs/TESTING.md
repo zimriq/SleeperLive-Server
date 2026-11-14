@@ -44,6 +44,13 @@ ESLint runs in CI. Formatting is applied file by file as code is updated.
 - `node scripts/benchmark-store.mjs` measures SQLite and poller costs at 100,
   300, and 1,000 activities with an instant simulated push transport.
 
+For a storage measurement on Railway develop, run the same script from the
+container with `--directory /path/to/develop-volume`, using the actual mount
+directory. The script creates and cleans up its own temporary SQLite databases
+under that directory. It never opens the service database. Run it at a quiet
+time because the benchmark shares the volume and CPU with the server.
+The output reports tick duration and synchronous transaction timing.
+
 These local runs use temporary databases and simulated Sleeper feeds and APNs.
 They measure accelerated workloads. Local timing includes the HTTP load
 generator and excludes real network latency, push throttling, and Railway load.
