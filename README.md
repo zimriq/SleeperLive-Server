@@ -135,3 +135,5 @@ Real-device and live-game behavior has been reported working, and automated test
 The app’s handling of `needsPushToken` remains a priority integration follow-up: the server can request a replacement token while the app acknowledges the response as successful. See the [recovery contract](docs/API.md#recovery-contract-develop-november-6-2026).
 
 Production backup policies, restoration/deletion reconciliation, and actual locked-phone delivery require operational verification. See the detailed documents for context rather than treating historical experiments as current deployment instructions.
+
+Copyright (c) 2026 Zimri Quinonez. All rights reserved. See LICENSE.
