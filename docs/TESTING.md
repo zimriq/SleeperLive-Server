@@ -25,6 +25,15 @@ and backups. The [iPhone app](https://github.com/zimriq/SleeperLive) has separat
 simulator checks. Use a signed iPhone on the development server to verify App
 Attest and real push delivery before a coordinated release.
 
+Use the pinned Prettier version on the files you are editing. For example:
+
+```bash
+npm exec -- prettier --write activity-router.js
+npm exec -- prettier --check activity-router.js
+```
+
+ESLint runs in CI. Formatting is applied file by file as code is updated.
+
 ## Load and storage benchmarks
 
 - `npm run test:load` runs idle, shared-league, twelve-league, and outage

@@ -26,7 +26,8 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "eslint": "10.14.0",
-    "globals": "17.14.0"
+    "globals": "17.14.0",
+    "prettier": "3.9.6"
   },
   "overrides": {
     "eslint": {
