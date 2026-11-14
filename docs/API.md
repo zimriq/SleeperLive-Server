@@ -121,8 +121,9 @@ Application errors use `{ "error": "<code>" }`. The health route uses its own
 response shape described above. HTTP parser errors can occur before the app runs.
 
 - **400 Bad Request** — `invalid_matchup`, `invalid_activity`, `invalid_started_at`,
-  `invalid_enrollment`, `invalid_client_ip`, or `entity.parse.failed`. Correct the
-  input or proxy configuration before retrying.
+  `invalid_enrollment`, `invalid_client_ip`, `https_required`, or `entity.parse.failed`.
+  For `https_required`, use the HTTPS endpoint. For other errors, check the input
+  or proxy configuration.
 - **401 Unauthorized** — `unauthorized`. The saved credential is missing,
   invalid, expired from inactivity, revoked, or deleted. Check the credential and offer explicit reconnect
   when the device needs to enroll again.

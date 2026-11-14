@@ -25,10 +25,12 @@ async function fixture(t,options={}){
   const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.on('listening',r));
   t.after(async()=>{await new Promise(r=>server.close(r));store.close();});
   const root=`http://127.0.0.1:${server.address().port}`;
-  async function call(path,method='GET',body,token){
-    return fetch(root+path,{method,headers:{'content-type':'application/json','x-real-ip':'127.0.0.1',...(token?{authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
+  async function call(path,method='GET',body,token,headers={}){
+    return fetch(root+path,{method,headers:{'content-type':'application/json','x-real-ip':'127.0.0.1',
+      ...(token?{authorization:`Bearer ${token}`}:{}),...headers},body:body?JSON.stringify(body):undefined});
   }
-  const auth=await (await call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  const enrollmentHeaders=options.cfg?.requireProxyHTTPS?{'x-forwarded-proto':'https'}:{};
+  const auth=await (await call('/v1/devices','POST',{inviteCode:cfg.invite},undefined,enrollmentHeaders)).json();
   return {store,call,root,token:auth.deviceToken};
 }
 
@@ -917,6 +919,46 @@ test('nosniff is present on successful, rejected, malformed and rate-limited res
   const limited=await fixture(t,{cfg:{ingressGlobal:1,ingressPerIP:1}});
   await check(await limited.call('/v1/devices/me','GET',null,limited.token),200);
   await check(await limited.call('/v1/devices/me','GET',null,limited.token),429);
+});
+
+test('proxy HTTPS enforcement is opt-in',()=>{
+  const env={INVITE_CODE:cfg.invite};
+  assert.equal(config(env).requireProxyHTTPS,false);
+  assert.equal(config({...env,REQUIRE_PROXY_HTTPS:'true'}).requireProxyHTTPS,true);
+  assert.throws(()=>config({...env,REQUIRE_PROXY_HTTPS:'yes'}),/Invalid REQUIRE_PROXY_HTTPS/);
+});
+
+test('proxy HTTPS protects all API routes and preserves local health probes',async t=>{
+  const f=await fixture(t,{cfg:{requireProxyHTTPS:true}});
+  const hsts='strict-transport-security';
+  const localHealth=await f.call('/health');
+  assert.equal(localHealth.status,200);
+  assert.equal(localHealth.headers.has(hsts),false);
+  const secureHealth=await fetch(f.root+'/health',{headers:{'x-forwarded-proto':'https'}});
+  assert.equal(secureHealth.status,200);
+  assert.equal(secureHealth.headers.get(hsts),'max-age=31536000');
+
+  for (const proto of [undefined,'http','https, http','https, https']) {
+    const response=await fetch(f.root+'/v1/devices/me',{headers:{
+      authorization:`Bearer ${f.token}`,...(proto?{'x-forwarded-proto':proto}:{}),
+    }});
+    assert.equal(response.status,400);
+    assert.deepEqual(await response.json(),{error:'https_required'});
+    assert.equal(response.headers.get('cache-control'),'no-store');
+    assert.equal(response.headers.has(hsts),false);
+  }
+
+  const enrollment=await f.call('/v1/enrollment/challenge','POST',{});
+  assert.equal(enrollment.status,400);
+  assert.deepEqual(await enrollment.json(),{error:'https_required'});
+  const secure=await fetch(f.root+'/v1/devices/me',{
+    headers:{'x-forwarded-proto':'https',authorization:`Bearer ${f.token}`},
+  });
+  assert.equal(secure.status,200);
+  assert.equal(secure.headers.get(hsts),'max-age=31536000');
+  const unauthorized=await fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-proto':'https'}});
+  assert.equal(unauthorized.status,401);
+  assert.equal(unauthorized.headers.get(hsts),'max-age=31536000');
 });
 
 test('poller commits batched reservations before sending and skips writes on unchanged ticks',async t=>{

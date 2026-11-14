@@ -24,6 +24,7 @@ export function config(env = process.env) {
   const c = {
     freshnessPriority,
     autoEnd: flag('ENABLE_AUTO_END'),
+    requireProxyHTTPS: flag('REQUIRE_PROXY_HTTPS'),
     endDismissalSeconds: number('END_DISMISSAL_SECONDS', 900, 0, 14400),
     port: number('PORT', 3000, 1, 65535), db: env.DB_PATH ?? './data/server.sqlite',
     attestEnabled, inviteEnabled, clientIPMode,

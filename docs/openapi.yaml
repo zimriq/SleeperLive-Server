@@ -5,6 +5,7 @@ info:
   description: >
     API for device enrollment, matchup scores, and Live Activity registrations.
     Use HTTPS when connecting remotely. See API.md for enrollment and lifecycle guidance.
+    When HTTPS is enforced, insecure API requests receive 400 with https_required.
 servers:
   - url: http://localhost:3000
     description: Local development

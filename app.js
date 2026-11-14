@@ -9,15 +9,29 @@ import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 const hash = text=>createHash('sha256').update(text).digest('hex');
 const equals=(a,b)=>timingSafeEqual(Buffer.from(hash(a),'hex'),Buffer.from(hash(b),'hex'));
 const fail=(status,error)=>Object.assign(new Error(error),{status});
+function usesHTTPS(req) {
+  if (req.secure) return true;
+  const values=req.headersDistinct['x-forwarded-proto'];
+  return values?.length===1 && values[0]==='https';
+}
 export function createApp({cfg,store,sleeper,estimator,now=Date.now,poller,log=logInfo,errorLog=logError}) {
   const app=express(), seconds=()=>Math.floor(now()/1000), limit=createApiRateLimiter(now);
   app.disable('x-powered-by');app.set('trust proxy',false);
-  app.use((_req,res,next)=>{res.set('X-Content-Type-Options','nosniff');next();});
+  app.use((req,res,next)=>{
+    res.set('X-Content-Type-Options','nosniff');
+    if (cfg.requireProxyHTTPS && usesHTTPS(req)) {
+      res.set('Strict-Transport-Security','max-age=31536000');
+    }
+    next();
+  });
   // Verify fixed-size bearer credentials using the committed, bounded memory index.
   // Unknown credentials never allocate cache entries or trigger database reads.
   let ingressUntil=0;
   const budgets={anonymous:{total:0,ips:new Map()},authenticated:{total:0,ips:new Map()}};
   app.use('/v1',(req,res,next)=>{
+    if (cfg.requireProxyHTTPS && !usesHTTPS(req)) {
+      return res.status(400).set('Cache-Control','no-store').json({error:'https_required'});
+    }
     req.clientIP=clientIP(req,cfg.clientIPMode);
     const enrollment=/^\/enrollment(?:\/|$)/i.test(req.path)||
       (req.method==='POST'&&/^\/devices\/?$/i.test(req.path));

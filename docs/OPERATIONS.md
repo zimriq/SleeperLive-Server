@@ -2,6 +2,21 @@
 
 [Back to README](../README.md)
 
+## HTTPS behind Railway
+
+Set `REQUIRE_PROXY_HTTPS=true` on develop when remote requests go exclusively
+through the trusted public HTTP edge. The edge must overwrite
+`X-Forwarded-Proto`. A caller with direct or private access to the HTTP listener
+can supply this header, so keep that access limited to trusted infrastructure.
+
+With the setting enabled, the API requires HTTPS and secure responses include
+`Strict-Transport-Security: max-age=31536000` for the current host. The local
+`/health` probe still accepts HTTP. The setting defaults to false for local use.
+
+After enabling it on develop, confirm the deployment health check passes,
+HTTPS `/health` returns 200 with the HSTS header, and the signed app can check
+its registration and load a matchup. Send no credentials over plain HTTP.
+
 ## Storage and backups
 
 SQLite stores device credential hashes and activity registrations. This design
