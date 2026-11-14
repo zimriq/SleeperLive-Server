@@ -94,7 +94,9 @@ export function createPoller({store,sleeper,transport,estimator,gameStatus,pollM
       const {message,version,deviceId}=reservation;
       if (reservation.autoEnded) log(`event=auto_end activity=${id.slice(0,8)} reason=matchup_final`);
       const attemptAt=seconds();
-      log(`event=push_attempt activity=${id.slice(0,8)} reason=${message.cause} priority=${message.priority} timestamp=${message.timestamp} updatedAt=${message.state.updatedAt} staleAt=${message.event==='end'?'none':message.state.updatedAt+360}`);
+      log(`event=push_attempt activity=${id.slice(0,8)} reason=${message.cause}`
+        + ` priority=${message.priority} timestamp=${message.timestamp} updatedAt=${message.state.updatedAt}`
+        + ` staleAt=${message.event==='end'?'none':message.state.updatedAt+360}`);
       let result;
       try { result=await transport.send(message); }
       catch { result={kind:'retry',reason:'TransportError'}; }
@@ -126,7 +128,11 @@ export function createPoller({store,sleeper,transport,estimator,gameStatus,pollM
         }
       });
       if(event)log(event);
-      if(result.kind!=='dead')log(`event=push_result activity=${id.slice(0,8)} reason=${result.reason??result.kind} status=${result.status??''} priority=${message.priority} timestamp=${message.timestamp} updatedAt=${message.state.updatedAt} completedAt=${completedAt} durationSeconds=${completedAt-attemptAt}`);
+      if (result.kind!=='dead') {
+        log(`event=push_result activity=${id.slice(0,8)} reason=${result.reason??result.kind} status=${result.status??''}`
+          + ` priority=${message.priority} timestamp=${message.timestamp} updatedAt=${message.state.updatedAt}`
+          + ` completedAt=${completedAt} durationSeconds=${completedAt-attemptAt}`);
+      }
       if(result.kind==='retry')log('APNs retry needed',result.status??'',result.reason??'');
     });
   }

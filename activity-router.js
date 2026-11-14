@@ -16,13 +16,26 @@ export function activityRouter({cfg,store,sleeper,estimator,now,log}) {
   function identity(body,query=false){
     const number=value=>query && typeof value==='string' && /^\d+$/.test(value)
       ? Number(value) : value;
-    const {leagueId}=body,week=number(body.week),rosterId=number(body.rosterId);
-    if(typeof leagueId!=='string' || !/^\d{6,25}$/.test(leagueId) || !Number.isInteger(week)||week<1||week>18||!Number.isInteger(rosterId)||rosterId<1||rosterId>100)throw fail(400,'invalid_matchup');
+    const {leagueId}=body;
+    const week=number(body.week);
+    const rosterId=number(body.rosterId);
+    if (typeof leagueId!=='string' || !/^\d{6,25}$/.test(leagueId)
+      || !Number.isInteger(week) || week<1 || week>18
+      || !Number.isInteger(rosterId) || rosterId<1 || rosterId>100) {
+      throw fail(400,'invalid_matchup');
+    }
     return {leagueId,week,rosterId};
   }
   async function getSnapshot(p){
-    try{const [data,meta]=await Promise.all([sleeper.matchups(p.leagueId,p.week),sleeper.meta(p.leagueId)]);return await snapshot(data,meta,p.rosterId,p.week,estimator);}
-    catch{throw fail(503,'matchup_unavailable');}
+    try {
+      const [data,meta]=await Promise.all([
+        sleeper.matchups(p.leagueId,p.week),
+        sleeper.meta(p.leagueId),
+      ]);
+      return await snapshot(data,meta,p.rosterId,p.week,estimator);
+    } catch {
+      throw fail(503,'matchup_unavailable');
+    }
   }
   router.get('/v1/matchup',async(req,res)=>{
     matchupLimit(req.deviceId,10);
@@ -30,7 +43,11 @@ export function activityRouter({cfg,store,sleeper,estimator,now,log}) {
   });
   router.put('/v1/activities/:id',async(req,res)=>{
     const id=req.params.id,b=req.body??{},p=identity(b),t=seconds();
-    if(!/^[A-Za-z0-9-]{8,80}$/.test(id)||typeof b.pushToken!=='string'||!/^([a-fA-F0-9]{2}){16,256}$/.test(b.pushToken)||!['development','production'].includes(b.apnsEnvironment))throw fail(400,'invalid_activity');
+    if (!/^[A-Za-z0-9-]{8,80}$/.test(id) || typeof b.pushToken!=='string'
+      || !/^([a-fA-F0-9]{2}){16,256}$/.test(b.pushToken)
+      || !['development','production'].includes(b.apnsEnvironment)) {
+      throw fail(400,'invalid_activity');
+    }
     if(!Number.isInteger(b.startedAt))throw fail(400,'invalid_started_at');
     // Validate access before doing upstream work, then recheck after await inside the transaction.
     const check=a=>{
@@ -75,7 +92,18 @@ export function activityRouter({cfg,store,sleeper,estimator,now,log}) {
   router.get('/v1/activities/:id',(req,res)=>{
     const a=ownActivity(store.read().activities,req.params.id);if(!a||a.deviceId!==req.deviceId)throw fail(404,'not_found');
     const reason=a.endedReason??a.endReason??null;
-    res.json({activityId:a.id,status:a.status,expiresAt:a.expiresAt,state:a.state,attributes:a.attributes,lastAcceptedAt:a.sentAt??null,endReason:reason,needsPushToken:a.status==='awaiting_token',endedReason:reason,endedAt:a.endedAt??null});
+    res.json({
+      activityId:a.id,
+      status:a.status,
+      expiresAt:a.expiresAt,
+      state:a.state,
+      attributes:a.attributes,
+      lastAcceptedAt:a.sentAt??null,
+      endReason:reason,
+      needsPushToken:a.status==='awaiting_token',
+      endedReason:reason,
+      endedAt:a.endedAt??null,
+    });
   });
   router.delete('/v1/activities/:id',(req,res)=>{
     store.change(s=>{

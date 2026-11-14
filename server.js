@@ -16,7 +16,8 @@ if (process.env.RAILWAY_ENVIRONMENT_NAME && cfg.clientIPMode === 'direct') {
   console.warn(JSON.stringify({
     level: 'warn',
     event: 'railway_direct_client_ip',
-    message: 'Direct client IP mode can group callers behind Railway’s HTTP proxy. For traffic exclusively through the public HTTP edge, verify header handling before setting CLIENT_IP_MODE=railway-public.',
+    message: 'Direct client IP mode can group callers behind Railway’s HTTP proxy.'
+      + ' For traffic exclusively through the public HTTP edge, verify header handling before setting CLIENT_IP_MODE=railway-public.',
   }));
 }
 const store=openStore(cfg.db),sleeper=createSleeper(undefined,Date.now,{maxActivities:cfg.maxActivities});

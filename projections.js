@@ -2,7 +2,15 @@ import { getJSON, score } from './sleeper.js';
 
 // Experimental time-remaining estimate. These feeds are undocumented.
 // Only these explicitly supported counting stats are scored; unknown rules fail closed.
-const LINEAR = new Set(`pass_yd pass_td pass_int pass_2pt pass_att pass_cmp pass_inc pass_sack pass_fd pass_int_td rush_yd rush_td rush_2pt rush_att rush_fd rec rec_yd rec_td rec_2pt rec_fd fum fum_lost fum_rec_td fgm fgm_yds fgm_0_19 fgm_20_29 fgm_30_39 fgm_40_49 fgm_50_59 fgm_60p fgmiss xpm xpmiss sack int ff fum_rec def_td safe blk_kick st_td st_ff st_fum_rec def_st_td def_st_ff def_st_fum_rec`.split(' '));
+const LINEAR = new Set([
+  'pass_yd', 'pass_td', 'pass_int', 'pass_2pt', 'pass_att', 'pass_cmp', 'pass_inc', 'pass_sack', 'pass_fd', 'pass_int_td',
+  'rush_yd', 'rush_td', 'rush_2pt', 'rush_att', 'rush_fd',
+  'rec', 'rec_yd', 'rec_td', 'rec_2pt', 'rec_fd',
+  'fum', 'fum_lost', 'fum_rec_td',
+  'fgm', 'fgm_yds', 'fgm_0_19', 'fgm_20_29', 'fgm_30_39', 'fgm_40_49', 'fgm_50_59', 'fgm_60p', 'fgmiss', 'xpm', 'xpmiss',
+  'sack', 'int', 'ff', 'fum_rec', 'def_td', 'safe', 'blk_kick',
+  'st_td', 'st_ff', 'st_fum_rec', 'def_st_td', 'def_st_ff', 'def_st_fum_rec',
+]);
 const TEAM = team => ({ LA: 'LAR', WSH: 'WAS', JAC: 'JAX' }[team] ?? team);
 export function gameProgress(event) {
   const status = event.status ?? event.competitions?.[0]?.status;
