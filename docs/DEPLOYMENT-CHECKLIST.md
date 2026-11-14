@@ -10,6 +10,10 @@
 - [ ] Set `DB_PATH` to the mounted volume and confirm one server instance owns
   database writes. Check volume permissions, database persistence across a
   redeploy, and the configured deployment drain time.
+- [ ] Before setting the Railway build variable `SLEEPERLIVE_RUNTIME_USER=node`,
+  verify the `node` user can write to the mounted database directory and its
+  existing SQLite database, including any WAL and SHM files. Verify that it can
+  read any configured APNs key files. The build defaults to `root`.
 - [ ] Set the Railway health check path to `/health`. Confirm the public HTTP
   edge is the only API ingress before using `CLIENT_IP_MODE=railway-public`
   and `REQUIRE_PROXY_HTTPS=true`.

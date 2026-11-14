@@ -4,5 +4,8 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY *.js ./
 ENV NODE_ENV=production
+# Set to node after verifying access to the mounted SQLite database.
+ARG SLEEPERLIVE_RUNTIME_USER=root
+USER ${SLEEPERLIVE_RUNTIME_USER}
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["node", "-e", "fetch(\"http://127.0.0.1:\" + (process.env.PORT ?? 3000) + \"/health\", {signal: AbortSignal.timeout(4000)}).then(response => process.exit(response.ok ? 0 : 1), () => process.exit(1))"]
 CMD ["node", "server.js"]
