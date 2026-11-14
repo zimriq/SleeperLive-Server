@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import cbor from 'cbor';
 import { enrollmentRouter, verifyAppleAttestation } from '../enrollment.js';
 import { openStore } from '../registrations.js';
@@ -119,6 +120,35 @@ test('public enrollment has global and per-IP request limits', async t => {
     headers:{'content-type':'application/json', 'x-forwarded-for':`192.0.2.${i+1}`},body:'{}'});
   assert.equal(last.status, 429);
 });
+test('real verifier accepts an Apple-signed production fixture and checks challenge, identity and expiry', () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL('./fixtures/node-app-attest/attestation-production.json', import.meta.url), 'utf8',
+  ));
+  const input = {
+    attestation: Buffer.from(fixture.attestation, 'base64'),
+    challenge: Buffer.from(fixture.challenge, 'base64'),
+    keyId: fixture.keyId,
+    cfg: {
+      bundleId: 'io.uebelacker.AppAttestExample',
+      attestAppIdPrefix: 'V8H6LQ9448',
+      attestAllowDevelopment: false,
+    },
+    // Inside the fixed validity window of both certificates in the fixture.
+    now: Date.parse('2024-06-01T00:00:00Z'),
+  };
+  const result = verifyAppleAttestation(input);
+  assert.equal(result.keyId, fixture.keyId);
+  assert.equal(result.environment, 'production');
+  assert.match(result.publicKey, /-----BEGIN PUBLIC KEY-----/);
+  assert.throws(() => verifyAppleAttestation({...input, challenge: 'different challenge'}), /nonce/i);
+  assert.throws(() => verifyAppleAttestation({
+    ...input, cfg: {...input.cfg, bundleId: 'com.example.other'},
+  }), /appId|rpId|bundle|hash/i);
+  assert.throws(() => verifyAppleAttestation({
+    ...input, now: Date.parse('2025-01-01T00:00:00Z'),
+  }), /Expired certificate/);
+});
+
 test('real verifier rejects garbage, wrong format, deeply nested CBOR and untrusted certificates', () => {
   let nested = 'x'; for(let i=0;i<25;i++) nested=[nested];
   const badCerts = {fmt:'apple-appattest', authData:Buffer.alloc(90),attStmt:{x5c:[Buffer.from('fake'),Buffer.from('fake')]}};
