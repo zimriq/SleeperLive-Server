@@ -124,7 +124,7 @@ response shape described above. HTTP parser errors can occur before the app runs
   `invalid_enrollment`, `invalid_client_ip`, or `entity.parse.failed`. Correct the
   input or proxy configuration before retrying.
 - **401 Unauthorized** — `unauthorized`. The saved credential is missing,
-  invalid, revoked, or deleted. Check the credential and offer explicit reconnect
+  invalid, expired from inactivity, revoked, or deleted. Check the credential and offer explicit reconnect
   when the device needs to enroll again.
 - **403 Forbidden** — `invalid_invite` or `invalid_attestation`. Check the invite
   or restart verification as appropriate.

@@ -62,7 +62,6 @@ owned active Live Activities for end pushes. Apple acceptance and delivery to
 the phone are separate events.
 Other devices are unaffected. Repeated revocation is safe. This revokes one device
 credential, not a Sleeper username or a person's ability to enroll a different key.
-No public administration endpoint or automatic device-record deletion is introduced.
 
 Every successful storage transaction removes the bearer credential hash and stored
 attestation public key from revoked records. This includes older revoked records
@@ -70,9 +69,27 @@ on the next normal write (such as poller housekeeping). Active device records ar
 unchanged. Revoked device IDs, attestation key IDs, and revocation flags remain to
 prevent key reuse; pending activity end tokens remain until their lifecycle finishes.
 This is logical data minimization, not secure erasure: older SQLite pages, WAL files,
-and backups can retain previous values. The poller reports daily counts of non-revoked devices idle for at least 60 days
-with no non-ended activities. The report is observational. Reclamation remains
-a separate rollout decision.
+and backups can retain previous values.
+
+## Inactive device credentials
+
+The poller checks for inactive devices on startup and about once a day.
+`DEVICE_IDLE_DAYS` defaults to 60 and accepts whole days from 2 to 3650.
+Successful authenticated requests refresh the last-used time at most once a day.
+Existing records without a last-used time get a full inactivity window from their
+first poll. Devices with active, ending, or awaiting-token activities and revoked
+records are excluded.
+
+With `ENABLE_DEVICE_IDLE_REAPING=false` (the default), the poller logs
+`device_idle_candidates` with the count and threshold. Run in this mode for a week
+and verify Reconnect on a signed iPhone in develop using a test registration
+removed by the reaper before enabling it in production.
+
+When `ENABLE_DEVICE_IDLE_REAPING=true`, qualifying device records are removed
+and the poller logs `device_idle_expired` with the count and threshold. Their old
+credentials receive HTTP 401. Reconnect performs fresh enrollment. Ended activity
+records are still removed by the normal activity cleanup. Turning the flag off
+stops further expiration. Previously expired devices still require enrollment.
 
 ## User-initiated device-data deletion
 

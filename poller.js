@@ -8,10 +8,13 @@ export function changed(a,b) {
   return ['yourScore','opponentScore','yourProjectionKind','opponentProjectionKind'].some(k=>a[k]!==b[k]) ||
     ['yourProjected','opponentProjected'].some(k=>(a[k]===null)!==(b[k]===null) || (a[k]!==null && Math.abs(a[k]-b[k])>=0.5));
 }
-export function createPoller({store,sleeper,transport,estimator,gameStatus,pollMs=75000,pushConcurrency=4,freshnessPriority=5,now=Date.now,log=logInfo,errorLog=logError}) {
+export function createPoller({
+  store,sleeper,transport,estimator,gameStatus,pollMs=75000,pushConcurrency=4,freshnessPriority=5,
+  deviceIdleDays=60,deviceIdleReaping=false,now=Date.now,log=logInfo,errorLog=logError,
+}) {
   if(!Number.isInteger(pushConcurrency)||pushConcurrency<1||pushConcurrency>16)throw Error('Invalid push concurrency');
   if(![5,10].includes(freshnessPriority))throw Error('Invalid freshness priority');
-  let timer, running, stopped=true, draining=false, nextIdleReport=0;
+  let timer, running, stopped=true, draining=false, nextIdleCheck=0;
   const seconds=()=>Math.floor(now()/1000);
   const status={lastRunAt:null,lastError:null};
   let finalScores = new Map();
@@ -140,7 +143,7 @@ export function createPoller({store,sleeper,transport,estimator,gameStatus,pollM
     const at=seconds();
     const previousFinalScores=finalScores;
     finalScores=new Map();
-    store.change(s=>{
+    const idleCount=store.change(s=>{
       for(const device of Object.values(s.devices)) {
         if(!device.revoked && !Number.isFinite(device.lastSeenAt)) device.lastSeenAt=at;
       }
@@ -152,18 +155,25 @@ export function createPoller({store,sleeper,transport,estimator,gameStatus,pollM
         if(a.status==='active' && a.expiresAt<=seconds()){a.status='ending';a.endedReason='expired';delete a.endReason;}
         if(a.status==='ended' && seconds()-a.endedAt>86400)delete s.activities[id];
       }
+      if (at<nextIdleCheck) return;
+      const occupied=new Set(Object.values(s.activities).filter(a=>a.status!=='ended').map(a=>a.deviceId));
+      const cutoff=at-deviceIdleDays*DAY_SECONDS;
+      let count=0;
+      for (const [id,device] of Object.entries(s.devices)) {
+        if (device.revoked || occupied.has(id) || device.lastSeenAt>cutoff) continue;
+        count++;
+        if (deviceIdleReaping) delete s.devices[id];
+      }
+      return count;
     });
+    if (idleCount!==undefined) {
+      nextIdleCheck=at+DAY_SECONDS;
+      const event=deviceIdleReaping?'device_idle_expired':'device_idle_candidates';
+      log(`event=${event} count=${idleCount} idleDays=${deviceIdleDays}`);
+    }
     const groups=new Map(), jobs=[];
     const state=store.read();
     const activities=Object.values(state.activities);
-    if(at>=nextIdleReport) {
-      const occupied=new Set(activities.filter(a=>a.status!=='ended').map(a=>a.deviceId));
-      const idleDays=60;
-      const candidates=Object.entries(state.devices).filter(([id,device])=>
-        !device.revoked && !occupied.has(id) && at-device.lastSeenAt>=idleDays*DAY_SECONDS).length;
-      log(`event=device_idle_candidates count=${candidates} idleDays=${idleDays}`);
-      nextIdleReport=at+DAY_SECONDS;
-    }
     for(const a of activities){
       if(['ended','awaiting_token'].includes(a.status) || !a.token || a.nextAttempt>seconds())continue;
       if(a.status==='ending'){jobs.push(()=>deliver(a.id));continue;}

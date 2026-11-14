@@ -258,7 +258,7 @@ components:
       description: Invalid input, JSON, or client IP
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     Unauthorized:
-      description: Missing, invalid, revoked, or deleted device credential
+      description: Missing, invalid, expired, revoked, or deleted device credential
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     NotFound:
       description: Disabled route or unavailable activity

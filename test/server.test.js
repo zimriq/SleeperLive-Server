@@ -986,6 +986,67 @@ test('inactivity reporting gives legacy devices a grace period and preserves all
   assert.equal(logs.length,1);
 });
 
+test('device inactivity settings default to reporting and validate overrides',()=>{
+  const env={INVITE_CODE:cfg.invite};
+  const defaults=config(env);
+  assert.equal(defaults.deviceIdleDays,60);
+  assert.equal(defaults.deviceIdleReaping,false);
+  const enabled=config({...env,DEVICE_IDLE_DAYS:'30',ENABLE_DEVICE_IDLE_REAPING:'true'});
+  assert.equal(enabled.deviceIdleDays,30);
+  assert.equal(enabled.deviceIdleReaping,true);
+  for (const value of ['0','1','2.5','3651','']) {
+    assert.throws(()=>config({...env,DEVICE_IDLE_DAYS:value}),/Invalid DEVICE_IDLE_DAYS/);
+  }
+  assert.throws(()=>config({...env,ENABLE_DEVICE_IDLE_REAPING:'yes'}),/Invalid ENABLE_DEVICE_IDLE_REAPING/);
+});
+
+test('inactivity expiry frees the device slot and rejects the old credential',async t=>{
+  let time=T;
+  const f=await fixture(t,{cfg:{maxDevices:1},now:()=>time*1000});
+  const id=f.token.split('.')[0], path='/v1/devices/me';
+  const enroll=()=>f.call('/v1/devices','POST',{inviteCode:cfg.invite});
+  const logs=[];
+  const poll=createPoller({store:f.store,deviceIdleDays:30,deviceIdleReaping:true,
+    now:()=>time*1000,log:event=>logs.push(event)});
+  time+=29*DAY_SECONDS;
+  await poll.tick();
+  assert.ok(f.store.credentialHash(id));
+  assert.equal((await enroll()).status,503);
+  time+=DAY_SECONDS;
+  await poll.tick();
+  assert.equal(f.store.read().devices[id],undefined);
+  assert.equal(f.store.credentialHash(id),undefined);
+  const expired=await f.call(path,'GET',null,f.token);
+  assert.equal(expired.status,401);
+  assert.deepEqual(await expired.json(),{error:'unauthorized'});
+  const replacement=await enroll();
+  assert.equal(replacement.status,201);
+  const {deviceToken}=await replacement.json();
+  assert.equal((await f.call(path,'GET',null,deviceToken)).status,200);
+  assert.deepEqual(logs,[
+    'event=device_idle_expired count=0 idleDays=30',
+    'event=device_idle_expired count=1 idleDays=30',
+  ]);
+});
+
+test('inactivity expiry protects live activities, recently used devices, and revocations',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  const idle={hash:'a',lastSeenAt:T-60*DAY_SECONDS};
+  store.change(s=>{
+    s.devices={...Object.fromEntries(['active','ending','awaiting_token','ended'].map(id=>[id,{...idle}])),
+      recent:{...idle,lastSeenAt:T-59*DAY_SECONDS},legacy:{hash:'b'},revoked:{...idle,revoked:true,attestKeyId:'keep'}};
+    for (const status of ['active','ending','awaiting_token','ended']) {
+      s.activities[status]=activity({id:status,deviceId:status,status,nextAttempt:T+75,endedAt:T});
+    }
+  });
+  const poll=createPoller({store,deviceIdleReaping:true,now:()=>T*1000,log:()=>{}});
+  await poll.tick();
+  const {devices}=store.read();
+  assert.deepEqual(Object.keys(devices),['active','ending','awaiting_token','recent','legacy','revoked']);
+  assert.equal(devices.legacy.lastSeenAt,T);
+  assert.equal(devices.revoked.attestKeyId,'keep');
+});
+
 test('poller shutdown finishes active sends without starting queued or preparing pushes',async t=>{
   const store=openStore(':memory:');t.after(()=>store.close());
   store.change(s=>{

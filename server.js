@@ -23,7 +23,11 @@ if (process.env.RAILWAY_ENVIRONMENT_NAME && cfg.clientIPMode === 'direct') {
 const store=openStore(cfg.db),sleeper=createSleeper(undefined,Date.now,{maxActivities:cfg.maxActivities});
 const estimator=cfg.projections?createEstimator():undefined,transport=createAPNs(cfg);
 const gameStatus=cfg.autoEnd?createGameStatus():undefined;
-const poller=createPoller({store,sleeper,transport,estimator,gameStatus,pollMs:cfg.pollMs,pushConcurrency:cfg.pushConcurrency,freshnessPriority:cfg.freshnessPriority});
+const poller=createPoller({
+  store,sleeper,transport,estimator,gameStatus,pollMs:cfg.pollMs,
+  pushConcurrency:cfg.pushConcurrency,freshnessPriority:cfg.freshnessPriority,
+  deviceIdleDays:cfg.deviceIdleDays,deviceIdleReaping:cfg.deviceIdleReaping,
+});
 const app=createApp({cfg,store,sleeper,estimator,poller});
 const server=createHTTPServer(app).listen(cfg.port,()=>{logInfo(`SleeperLive listening on ${cfg.port}; APNs ${cfg.mode}`);poller.start();});
 let stopping = false;
