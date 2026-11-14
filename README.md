@@ -107,6 +107,7 @@ See [Operations](docs/OPERATIONS.md) before performing backups, restoration, rev
 
 ## Documentation
 
+- [Deployment checklist](docs/DEPLOYMENT-CHECKLIST.md): Railway settings and release verification.
 - [API and app integration](docs/API.md): endpoints, payloads, App Attest enrollment, and token recovery.
 - [Operations](docs/OPERATIONS.md): storage, backups, retention, revocation, and deletion.
 - [Reliability](docs/RELIABILITY.md): polling, push delivery, estimates, safeguards, and limits.
