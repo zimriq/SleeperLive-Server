@@ -1,3 +1,4 @@
+import { createRateLimiter } from './rate-limit.js';
 const ROOT = 'https://api.sleeper.app/v1';
 export async function getJSON(url, {fetchImpl=fetch} = {}) {
   // The all-player catalog is substantially larger than league or weekly feeds.
@@ -25,28 +26,47 @@ export async function getJSON(url, {fetchImpl=fetch} = {}) {
     reader.releaseLock();
   }
 }
-export function createSleeper(load = getJSON, now = Date.now) {
+export function createSleeper(load = getJSON, now = Date.now, {onFetch, maxActivities=100} = {}) {
+  if (!Number.isInteger(maxActivities) || maxActivities<1 || maxActivities>1000)
+    throw new Error('Invalid cache maxActivities');
+  // One matchup and one metadata entry per activity, plus room for browsing.
+  const maxEntries=maxActivities*2+100;
+  const limit = createRateLimiter(now,1);
+  const beforeFetch = onFetch ?? (() => {
+    try { limit('global:upstream',60); }
+    catch (error) { error.code='UPSTREAM_RATE_LIMITED'; throw error; }
+  });
+  // Charge each physical request, including all three metadata endpoints.
+  const fetchJSON = async url => { beforeFetch(); return load(url); };
   const cache = new Map(), pending = new Map();
   async function memo(key, ttl, fn) {
     const hit = cache.get(key);
-    if (hit && now() - hit.time < ttl) return hit.value;
+    if (hit) {
+      // Refresh recency without extending freshness or changing score timestamps.
+      cache.delete(key); cache.set(key,hit);
+      if (now() - hit.time < ttl) return hit.value;
+    }
     if (pending.has(key)) return pending.get(key);
-    const task = fn().then(value => {
+    const task = Promise.resolve().then(fn).then(value => {
       cache.delete(key); cache.set(key, { time: now(), value });
-      while (cache.size > 200) cache.delete(cache.keys().next().value);
+      while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
       return value;
+    }).catch(error => {
+      // Preserve the original timestamp: cached scores must not appear refreshed.
+      if (error.code === 'UPSTREAM_RATE_LIMITED' && hit) return hit.value;
+      throw error;
     }).finally(() => pending.delete(key));
     pending.set(key, task); return task;
   }
   return {
     matchups: (league, week) => memo(`m:${league}:${week}`, 5000, async () => {
-      const rows = await load(`${ROOT}/league/${league}/matchups/${week}`);
+      const rows = await fetchJSON(`${ROOT}/league/${league}/matchups/${week}`);
       if (!Array.isArray(rows)) throw new Error('Invalid matchups');
       return { rows, updatedAt: Math.floor(now()/1000) };
     }),
     meta: league => memo(`l:${league}`, 300000, async () => {
       const [info, rosters, users] = await Promise.all([
-        load(`${ROOT}/league/${league}`), load(`${ROOT}/league/${league}/rosters`), load(`${ROOT}/league/${league}/users`),
+        fetchJSON(`${ROOT}/league/${league}`), fetchJSON(`${ROOT}/league/${league}/rosters`), fetchJSON(`${ROOT}/league/${league}/users`),
       ]);
       if (!info?.season || !Array.isArray(rosters) || !Array.isArray(users)) throw new Error('Invalid league');
       return { info, rosters, users };

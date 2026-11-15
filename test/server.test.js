@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openStore } from '../registrations.js';
+import { DatabaseSync } from 'node:sqlite';
+import { DAY_SECONDS, openStore } from '../registrations.js';
 import { createApp } from '../app.js';
 import { createPoller } from '../poller.js';
 import { createSleeper, snapshot, score } from '../sleeper.js';
@@ -24,10 +25,12 @@ async function fixture(t,options={}){
   const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.on('listening',r));
   t.after(async()=>{await new Promise(r=>server.close(r));store.close();});
   const root=`http://127.0.0.1:${server.address().port}`;
-  async function call(path,method='GET',body,token){
-    return fetch(root+path,{method,headers:{'content-type':'application/json','x-real-ip':'127.0.0.1',...(token?{authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
+  async function call(path,method='GET',body,token,headers={}){
+    return fetch(root+path,{method,headers:{'content-type':'application/json','x-real-ip':'127.0.0.1',
+      ...(token?{authorization:`Bearer ${token}`}:{}),...headers},body:body?JSON.stringify(body):undefined});
   }
-  const auth=await (await call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  const enrollmentHeaders=options.cfg?.requireProxyHTTPS?{'x-forwarded-proto':'https'}:{};
+  const auth=await (await call('/v1/devices','POST',{inviteCode:cfg.invite},undefined,enrollmentHeaders)).json();
   return {store,call,root,token:auth.deviceToken};
 }
 
@@ -374,7 +377,7 @@ test('disabled invite enrollment does not access storage or invalidate existing 
   const id='b'.repeat(32),secret='c'.repeat(64);
   store.change(s=>s.devices[id]={hash:createHash('sha256').update(secret).digest('hex'),createdAt:T});
   let reads=0,writes=0;
-  const observed={credentialHash:store.credentialHash,read:()=>{reads++;return store.read();},change:fn=>{writes++;return store.change(fn);}};
+  const observed={...store,read:()=>{reads++;return store.read();},change:fn=>{writes++;return store.change(fn);}};
   const app=createApp({cfg:{...cfg,inviteEnabled:false,attestEnabled:true},store:observed,sleeper,now:()=>T*1000});
   const server=app.listen(0,'127.0.0.1');
   await new Promise(r=>server.on('listening',r));
@@ -404,9 +407,9 @@ test('explicit private invite enrollment works alongside App Attest and never ca
 });
 
 
-test('public health preserves the iOS contract without exposing or consulting internal status',async t=>{
+test('public health preserves the iOS contract without exposing private status or reading storage',async t=>{
   for(const mode of ['live','dry-run']){
-    const f=await fixture(t,{cfg:{mode},poller:{status:()=>{throw Error('private database path and credentials');}}});
+    const f=await fixture(t,{cfg:{mode},poller:{status:()=>({lastRunAt:T,lastError:'private database path and credentials'})}});
     let reads=0;
     const read=f.store.read;
     f.store.read=()=>{reads++;return read();};
@@ -777,4 +780,453 @@ test('projection traffic cannot indefinitely postpone urgent freshness heartbeat
   await poll.tick();
   for(let i=0;i<3;i++){time+=75;projection++;await poll.tick();}
   assert.deepEqual(sent.map(m=>m.priority),[10,5,5,10]);assert.equal(sent.at(-1).cause,'heartbeat');store.close();
+});
+
+test('matchup cap is per device and does not block another device or registration',async t=>{
+  const f=await fixture(t);
+  const path='/v1/matchup?leagueId=123456789&week=6&rosterId=1';
+  for(let i=0;i<10;i++)assert.equal((await f.call(path,'GET',null,f.token)).status,200);
+  assert.equal((await f.call(path,'GET',null,f.token)).status,429);
+  const other=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  assert.equal((await f.call(path,'GET',null,other.deviceToken)).status,200);
+  assert.equal((await f.call('/v1/activities/activity-new','PUT',registration,f.token)).status,201);
+});
+
+test('cached traffic cannot exhaust upstream budget for a third device registration',async t=>{
+  let calls=0;
+  const api=createSleeper(async url=>{
+    calls++;
+    if(url.includes('/matchups/'))return rows;
+    if(url.endsWith('/rosters'))return meta.rosters;
+    if(url.endsWith('/users'))return meta.users;
+    return meta.info;
+  },()=>T*1000);
+  const f=await fixture(t,{sleeper:api});
+  const second=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  for(const token of [f.token,second.deviceToken]){
+    for(let i=0;i<30;i++)assert.equal((await f.call(`/v1/activities/cached-${token.slice(0,8)}`,'PUT',registration,token)).status,i===0?201:200);
+  }
+  const third=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  assert.equal((await f.call('/v1/matchup?leagueId=123456789&week=6&rosterId=1','GET',null,third.deviceToken)).status,200);
+  assert.equal((await f.call('/v1/activities/third-new','PUT',registration,third.deviceToken)).status,201);
+  assert.equal(calls,4);
+});
+
+test('health allows startup grace, detects stalled completion, and recovers',async t=>{
+  let time=T,lastRunAt=null;
+  const f=await fixture(t,{now:()=>time*1000,cfg:{pollMs:60000},poller:{status:()=>({lastRunAt,lastError:'private'})}});
+  const check=async(status,ok)=>{
+    const response=await f.call('/health');
+    assert.equal(response.status,status);
+    assert.equal(response.headers.get('cache-control'),'no-store');
+    assert.deepEqual(await response.json(),{ok,mode:'dry-run'});
+  };
+  await check(200,true);
+  time=T+180;await check(200,true);
+  time++;await check(503,false);
+  lastRunAt=time;await check(200,true);
+  time+=181;await check(503,false);
+  lastRunAt=time;await check(200,true);
+});
+
+test('unexpected request failures log a safe stack and preserve generic response',async t=>{
+  const messages=[],original=console.error;
+  console.error=message=>messages.push(JSON.parse(message));
+  t.after(()=>{console.error=original;});
+  const f=await fixture(t);
+  f.store.read=()=>{throw Error('body-secret\n    at bearer-secret');};
+  const response=await f.call('/v1/activities/activity-1','GET',null,f.token);
+  assert.equal(response.status,500);
+  assert.deepEqual(await response.json(),{error:'internal_error'});
+  assert.equal(messages.length,1);
+  assert.equal(messages[0].level,'error');assert.equal(messages[0].event,'request_failed');
+  assert.match(messages[0].stack,/server.test.js/);
+  const output=JSON.stringify(messages);
+  for(const secret of ['body-secret','bearer-secret',f.token])assert.equal(output.includes(secret),false);
+});
+
+test('completed ticks remain healthy through upstream outages; failed ticks recover',async t=>{
+  let time=T,fail=false;
+  const errors=[],store=openStore(':memory:');t.after(()=>store.close());
+  store.change(s=>{s.activities.a=activity();});
+  const read=store.read.bind(store);
+  store.read=()=>{if(fail)throw Error('private');return read();};
+  const poll=createPoller({store,now:()=>time*1000,sleeper:{matchups:async()=>{throw Error('outage');},meta:async()=>meta},transport:{send:async()=>{throw Error('must not send');}},log:()=>{},errorLog:(event)=>errors.push(event)});
+  await poll.tick();assert.equal(poll.status().lastRunAt,T);assert.equal(poll.status().lastError,null);
+  time+=75;fail=true;await poll.tick();
+  assert.equal(poll.status().lastRunAt,T);assert.equal(poll.status().lastError,'private');
+  assert.deepEqual(errors,['poll_failed']);
+  time+=75;fail=false;await poll.tick();
+  assert.equal(poll.status().lastRunAt,time);assert.equal(poll.status().lastError,null);
+});
+
+test('registration rejects coercible non-number identities before upstream work',async t=>{
+  let calls=0;
+  const f=await fixture(t,{sleeper:{matchups:async()=>{calls++;return {rows,updatedAt:T};},meta:async()=>{calls++;return meta;}}});
+  for(const field of ['week','rosterId']){
+    for(const value of [true,false,null,[],[1],{},'1',1.5]){
+      const response=await f.call('/v1/activities/strict-id','PUT',{...registration,[field]:value},f.token);
+      assert.equal(response.status,400,`${field}=${JSON.stringify(value)}`);
+      assert.deepEqual(await response.json(),{error:'invalid_matchup'});
+    }
+  }
+  assert.equal(calls,0);assert.deepEqual(f.store.read().activities,{});
+  assert.equal((await f.call('/v1/activities/strict-id','PUT',registration,f.token)).status,201);
+});
+
+test('matchup query accepts numeric strings and rejects repeated or non-numeric values',async t=>{
+  const f=await fixture(t);
+  const base='/v1/matchup?leagueId=123456789&';
+  assert.equal((await f.call(base+'week=6&rosterId=1','GET',null,f.token)).status,200);
+  for(const query of ['week=true&rosterId=1','week=6&rosterId=true','week=6&week=7&rosterId=1','week=6&rosterId=1&rosterId=2','week=&rosterId=1','week=6&rosterId=1.5']){
+    const response=await f.call(base+query,'GET',null,f.token);
+    assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:'invalid_matchup'});
+  }
+});
+
+test('object-property activity IDs support creation, retry, ownership checks and deletion',async t=>{
+  const f=await fixture(t);
+  const other=await(await f.call('/v1/devices','POST',{inviteCode:cfg.invite})).json();
+  for(const id of ['constructor','toString','hasOwnProperty']){
+    const path=`/v1/activities/${id}`;
+    assert.equal((await f.call(path,'GET',null,f.token)).status,404);
+    assert.equal((await f.call(path,'DELETE',null,f.token)).status,204);
+    assert.equal((await f.call(path,'PUT',registration,f.token)).status,201);
+    assert.equal((await f.call(path,'PUT',registration,f.token)).status,200);
+    assert.equal((await(await f.call(path,'GET',null,f.token)).json()).activityId,id);
+    assert.equal((await f.call(path,'GET',null,other.deviceToken)).status,404);
+    assert.equal((await f.call(path,'PUT',registration,other.deviceToken)).status,404);
+    assert.equal((await f.call(path,'DELETE',null,other.deviceToken)).status,204);
+    assert.equal(f.store.read().activities[id].status,'active');
+    assert.equal((await f.call(path,'DELETE',null,f.token)).status,204);
+    assert.equal(f.store.read().activities[id].status,'ended');
+  }
+});
+
+test('nosniff is present on successful, rejected, malformed and rate-limited responses',async t=>{
+  const f=await fixture(t);
+  const check=async(response,status)=>{
+    assert.equal(response.status,status);
+    assert.equal(response.headers.get('x-content-type-options'),'nosniff');
+  };
+  await check(await f.call('/health'),200);
+  await check(await f.call('/v1/devices/me','GET',null,f.token),200);
+  await check(await f.call('/v1/devices/me'),401);
+  await check(await f.call('/missing'),404);
+  await check(await fetch(f.root+'/v1/activities/activity-1',{
+    method:'PUT',headers:{'content-type':'application/json',authorization:`Bearer ${f.token}`},body:'{'
+  }),400);
+  const limited=await fixture(t,{cfg:{ingressGlobal:1,ingressPerIP:1}});
+  await check(await limited.call('/v1/devices/me','GET',null,limited.token),200);
+  await check(await limited.call('/v1/devices/me','GET',null,limited.token),429);
+});
+
+test('proxy HTTPS enforcement is opt-in',()=>{
+  const env={INVITE_CODE:cfg.invite};
+  assert.equal(config(env).requireProxyHTTPS,false);
+  assert.equal(config({...env,REQUIRE_PROXY_HTTPS:'true'}).requireProxyHTTPS,true);
+  assert.throws(()=>config({...env,REQUIRE_PROXY_HTTPS:'yes'}),/Invalid REQUIRE_PROXY_HTTPS/);
+});
+
+test('proxy HTTPS protects all API routes and preserves local health probes',async t=>{
+  const f=await fixture(t,{cfg:{requireProxyHTTPS:true}});
+  const hsts='strict-transport-security';
+  const localHealth=await f.call('/health');
+  assert.equal(localHealth.status,200);
+  assert.equal(localHealth.headers.has(hsts),false);
+  const secureHealth=await fetch(f.root+'/health',{headers:{'x-forwarded-proto':'https'}});
+  assert.equal(secureHealth.status,200);
+  assert.equal(secureHealth.headers.get(hsts),'max-age=31536000');
+
+  for (const proto of [undefined,'http','https, http','https, https']) {
+    const response=await fetch(f.root+'/v1/devices/me',{headers:{
+      authorization:`Bearer ${f.token}`,...(proto?{'x-forwarded-proto':proto}:{}),
+    }});
+    assert.equal(response.status,400);
+    assert.deepEqual(await response.json(),{error:'https_required'});
+    assert.equal(response.headers.get('cache-control'),'no-store');
+    assert.equal(response.headers.has(hsts),false);
+  }
+
+  const enrollment=await f.call('/v1/enrollment/challenge','POST',{});
+  assert.equal(enrollment.status,400);
+  assert.deepEqual(await enrollment.json(),{error:'https_required'});
+  const secure=await fetch(f.root+'/v1/devices/me',{
+    headers:{'x-forwarded-proto':'https',authorization:`Bearer ${f.token}`},
+  });
+  assert.equal(secure.status,200);
+  assert.equal(secure.headers.get(hsts),'max-age=31536000');
+  const unauthorized=await fetch(f.root+'/v1/devices/me',{headers:{'x-forwarded-proto':'https'}});
+  assert.equal(unauthorized.status,401);
+  assert.equal(unauthorized.headers.get(hsts),'max-age=31536000');
+});
+
+test('poller commits batched reservations before sending and skips writes on unchanged ticks',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'sleeper-batching-')), file=join(dir,'state.sqlite');
+  const store=openStore(file), observer=new DatabaseSync(file,{readOnly:true});
+  t.after(()=>{observer.close();store.close();rmSync(dir,{recursive:true});});
+  store.change(s=>{
+    for(let i=0;i<4;i++)s.activities[`a${i}`]=activity({id:`a${i}`});
+  });
+  const read=observer.prepare('SELECT value FROM state WHERE id=1');
+  const dataVersion=observer.prepare('PRAGMA data_version');
+  let time=T, transactions=0, sends=0;
+  const poll=createPoller({store:{...store,change(fn){transactions++;return store.change(fn);}},
+    sleeper,now:()=>time*1000,log:()=>{},transport:{send:async message=>{
+      sends++;
+      assert.ok(Object.values(JSON.parse(read.get().value).activities)
+        .every(a=>a.pushTimestamp===message.timestamp));
+      return {kind:'ok'};
+    }}});
+  await poll.tick();
+  assert.equal(sends,4);
+  assert.equal(transactions,3,'one housekeeping call, one reservation batch, one result batch');
+  assert.ok(Object.values(store.read().activities).every(a=>a.sentAt===T));
+  const before=dataVersion.get().data_version;
+  time+=75;
+  await poll.tick();
+  assert.equal(sends,4);
+  assert.equal(dataVersion.get().data_version,before,'unchanged tick does not update SQLite');
+});
+
+test('successful authenticated use updates lastSeenAt at most once daily',async t=>{
+  let time=T;
+  const f=await fixture(t,{now:()=>time*1000});
+  const id=f.token.split('.')[0], path='/v1/devices/me';
+  const seen=()=>f.store.read().devices[id].lastSeenAt;
+  assert.equal(seen(),T);
+  time+=DAY_SECONDS-1;
+  assert.equal((await f.call(path,'GET',null,f.token)).status,200);
+  assert.equal(seen(),T);
+  time++;
+  assert.equal((await f.call('/v1/activities/missing','GET',null,f.token)).status,404);
+  assert.equal((await f.call('/health')).status,200);
+  assert.equal(seen(),T);
+  assert.equal((await f.call(path,'GET',null,f.token)).status,200);
+  assert.equal(seen(),time);
+  time+=DAY_SECONDS;
+  assert.equal((await f.call(path,'DELETE',null,f.token)).status,204);
+  assert.equal(seen(),T+DAY_SECONDS,'revocation does not count as use');
+});
+
+test('inactivity reporting gives legacy devices a grace period and preserves all records',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  let time=T;
+  const idle={hash:'a',createdAt:T-120*DAY_SECONDS,lastSeenAt:T-60*DAY_SECONDS};
+  store.change(s=>{
+    s.devices={idle:{...idle},busy:{...idle},revoked:{...idle,revoked:true},legacy:{hash:'b',createdAt:idle.createdAt}};
+    s.activities.a=activity({deviceId:'busy',status:'awaiting_token',token:null});
+  });
+  const logs=[];
+  const poll=createPoller({store,sleeper,now:()=>time*1000,log:event=>logs.push(event)});
+  await poll.tick();
+  assert.equal(store.read().devices.legacy.lastSeenAt,T);
+  assert.equal(Object.keys(store.read().devices).length,4);
+  assert.deepEqual(logs,['event=device_idle_candidates count=1 idleDays=60']);
+  time+=75;
+  await poll.tick();
+  assert.equal(logs.length,1);
+});
+
+test('device inactivity settings default to reporting and validate overrides',()=>{
+  const env={INVITE_CODE:cfg.invite};
+  const defaults=config(env);
+  assert.equal(defaults.deviceIdleDays,60);
+  assert.equal(defaults.deviceIdleReaping,false);
+  const enabled=config({...env,DEVICE_IDLE_DAYS:'30',ENABLE_DEVICE_IDLE_REAPING:'true'});
+  assert.equal(enabled.deviceIdleDays,30);
+  assert.equal(enabled.deviceIdleReaping,true);
+  for (const value of ['0','1','2.5','3651','']) {
+    assert.throws(()=>config({...env,DEVICE_IDLE_DAYS:value}),/Invalid DEVICE_IDLE_DAYS/);
+  }
+  assert.throws(()=>config({...env,ENABLE_DEVICE_IDLE_REAPING:'yes'}),/Invalid ENABLE_DEVICE_IDLE_REAPING/);
+});
+
+test('inactivity expiry frees the device slot and rejects the old credential',async t=>{
+  let time=T;
+  const f=await fixture(t,{cfg:{maxDevices:1},now:()=>time*1000});
+  const id=f.token.split('.')[0], path='/v1/devices/me';
+  const enroll=()=>f.call('/v1/devices','POST',{inviteCode:cfg.invite});
+  const logs=[];
+  const poll=createPoller({store:f.store,deviceIdleDays:30,deviceIdleReaping:true,
+    now:()=>time*1000,log:event=>logs.push(event)});
+  time+=29*DAY_SECONDS;
+  await poll.tick();
+  assert.ok(f.store.credentialHash(id));
+  assert.equal((await enroll()).status,503);
+  time+=DAY_SECONDS;
+  await poll.tick();
+  assert.equal(f.store.read().devices[id],undefined);
+  assert.equal(f.store.credentialHash(id),undefined);
+  const expired=await f.call(path,'GET',null,f.token);
+  assert.equal(expired.status,401);
+  assert.deepEqual(await expired.json(),{error:'unauthorized'});
+  const replacement=await enroll();
+  assert.equal(replacement.status,201);
+  const {deviceToken}=await replacement.json();
+  assert.equal((await f.call(path,'GET',null,deviceToken)).status,200);
+  assert.deepEqual(logs,[
+    'event=device_idle_expired count=0 idleDays=30',
+    'event=device_idle_expired count=1 idleDays=30',
+  ]);
+});
+
+test('inactivity expiry protects live activities, recently used devices, and revocations',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  const idle={hash:'a',lastSeenAt:T-60*DAY_SECONDS};
+  store.change(s=>{
+    s.devices={...Object.fromEntries(['active','ending','awaiting_token','ended'].map(id=>[id,{...idle}])),
+      recent:{...idle,lastSeenAt:T-59*DAY_SECONDS},legacy:{hash:'b'},revoked:{...idle,revoked:true,attestKeyId:'keep'}};
+    for (const status of ['active','ending','awaiting_token','ended']) {
+      s.activities[status]=activity({id:status,deviceId:status,status,nextAttempt:T+75,endedAt:T});
+    }
+  });
+  const poll=createPoller({store,deviceIdleReaping:true,now:()=>T*1000,log:()=>{}});
+  await poll.tick();
+  const {devices}=store.read();
+  assert.deepEqual(Object.keys(devices),['active','ending','awaiting_token','recent','legacy','revoked']);
+  assert.equal(devices.legacy.lastSeenAt,T);
+  assert.equal(devices.revoked.attestKeyId,'keep');
+});
+
+test('poller shutdown finishes active sends without starting queued or preparing pushes',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  store.change(s=>{
+    s.activities.a=activity({id:'a',token:'already-sending',status:'ending'});
+    s.activities.b=activity({id:'b',token:'preparing',pushTimestamp:0});
+    s.activities.c=activity({id:'c',token:'queued',pushTimestamp:0});
+  });
+  let releaseFeed,releaseSend;
+  const feedGate=new Promise(resolve=>{releaseFeed=resolve;});
+  const sendGate=new Promise(resolve=>{releaseSend=resolve;});
+  const sends=[];
+  const poll=createPoller({store,pushConcurrency:2,now:()=>T*1000,log:()=>{},
+    sleeper:{...sleeper,matchups:async()=>{await feedGate;return {rows,updatedAt:T};}},
+    transport:{send:async message=>{sends.push(message.token);await sendGate;return {kind:'ok'};}},
+  });
+  const tick=poll.tick();
+  try {
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(sends,['already-sending']);
+    let stopped=false;
+    const drain=poll.stop().then(()=>{stopped=true;});
+    releaseFeed();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(stopped,false,'the active push still owns its pending result');
+    releaseSend();
+    await drain;
+    const {activities}=store.read();
+    assert.equal(activities.a.status,'ended');
+    assert.equal(activities.b.pushTimestamp,0);
+    assert.equal(activities.c.pushTimestamp,0);
+    await poll.tick();
+    assert.deepEqual(sends,['already-sending']);
+  } finally {releaseFeed();releaseSend();await tick;}
+});
+
+test('production requires an explicit database path and local development keeps its default',()=>{
+  const env={INVITE_ENROLLMENT_ENABLED:'false'};
+  for (const DB_PATH of [undefined,'','   ']) {
+    assert.throws(()=>config({...env,NODE_ENV:'production',DB_PATH}),/Set DB_PATH explicitly/);
+  }
+  assert.equal(config({...env,NODE_ENV:'production',DB_PATH:'/data/server.sqlite'}).db,'/data/server.sqlite');
+  assert.equal(config(env).db,'./data/server.sqlite');
+});
+
+test('auto-end waits for fresh stable scores, sends the latest state, and keeps the end reason after cleanup',async t=>{
+  let time=T,points=10,updatedAt=T,allFinal=false;
+  const f=await fixture(t,{now:()=>time*1000});
+  assert.equal((await f.call('/v1/activities/auto-end','PUT',registration,f.token)).status,201);
+  const messages=[],logs=[];
+  const poll=createPoller({store:f.store,now:()=>time*1000,log:line=>logs.push(line),
+    sleeper:{...sleeper,matchups:async()=>({rows:[{...rows[0],points},rows[1]],updatedAt})},
+    gameStatus:async()=>allFinal,
+    transport:{send:async message=>{messages.push(message);return {kind:'ok'};}},
+  });
+  const tick=async({fresh=true}={})=>{time+=75;if(fresh)updatedAt=time;await poll.tick();};
+  await tick();
+  allFinal=true;
+  await tick();
+  await tick({fresh:false});
+  points=15;
+  await tick();
+  await tick();
+  assert.equal(messages.some(m=>m.event==='end'),false);
+  await tick();
+  assert.equal(messages.at(-1).event,'end');
+  assert.equal(messages.at(-1).state.yourScore,15);
+  assert.equal(messages.at(-1).state.updatedAt,time);
+  assert.equal(logs.filter(line=>line.includes('event=auto_end')).length,1);
+  assert.equal((await f.call('/v1/activities/auto-end','DELETE',null,f.token)).status,204);
+  const response=await f.call('/v1/activities/auto-end','GET',null,f.token);
+  const ended=await response.json();
+  assert.equal(ended.status,'ended');
+  assert.equal(ended.endedReason,'matchup_final');
+  assert.equal(ended.state.yourScore,15);
+});
+
+test('auto-end ten-minute fallback waits for a fresh score and retries the final end payload',async t=>{
+  const store=openStore(':memory:');t.after(()=>store.close());
+  store.change(s=>{s.activities.a=activity({id:'a'});});
+  const messages=[];
+  let time=T,updatedAt=T,points=0,endAttempts=0;
+  const poll=createPoller({store,now:()=>time*1000,log:()=>{},
+    sleeper:{...sleeper,matchups:async()=>({rows:[{...rows[0],points},rows[1]],updatedAt})},
+    gameStatus:async()=>true,
+    transport:{send:async message=>{
+      messages.push(message);
+      return {kind:message.event==='end' && ++endAttempts===1?'retry':'ok'};
+    }},
+  });
+  await poll.tick();
+  for(let i=1;i<=8;i++) {
+    time+=75;points=i;
+    if(i<8)updatedAt=time;
+    await poll.tick();
+  }
+  assert.equal(endAttempts,0,'an old cache timestamp cannot trigger an end');
+  time+=75;updatedAt=time;points=12;
+  await poll.tick();
+  assert.equal(endAttempts,1);
+  assert.equal(store.read().activities.a.status,'ending');
+  time+=75;
+  await poll.tick();
+  assert.equal(endAttempts,2);
+  assert.equal(messages.at(-1).state.yourScore,12);
+  assert.equal(store.read().activities.a.endedReason,'matchup_final');
+});
+
+test('end dismissal defaults to fifteen minutes and supports an explicit interval',()=>{
+  const env={INVITE_ENROLLMENT_ENABLED:'false'};
+  assert.equal(config(env).autoEnd,false);
+  assert.equal(config(env).endDismissalSeconds,900);
+  const cfg=config({...env,ENABLE_AUTO_END:'true',END_DISMISSAL_SECONDS:'600'});
+  assert.equal(cfg.autoEnd,true);
+  const message={event:'end',timestamp:T,state:{updatedAt:T}};
+  assert.equal(payload(message).aps['dismissal-date'],T+900);
+  assert.equal(payload(message,cfg.endDismissalSeconds).aps['dismissal-date'],T+600);
+  assert.throws(()=>config({...env,END_DISMISSAL_SECONDS:'14401'}),/Invalid END_DISMISSAL_SECONDS/);
+});
+
+test('legacy end reasons are readable and a completed end writes only the canonical field',async t=>{
+  const f=await fixture(t);
+  const deviceId=f.token.split('.')[0];
+  f.store.change(s=>{
+    s.activities['legacy-end']=activity({id:'legacy-end',deviceId,status:'ending',endReason:'device_revoked'});
+  });
+  const path='/v1/activities/legacy-end';
+  const before=await(await f.call(path,'GET',null,f.token)).json();
+  assert.equal(before.endReason,'device_revoked');
+  assert.equal(before.endedReason,'device_revoked');
+
+  const poll=createPoller({store:f.store,now:()=>T*1000,log:()=>{},
+    transport:{send:async()=>({kind:'ok'})}});
+  await poll.tick();
+  const stored=f.store.read().activities['legacy-end'];
+  assert.equal(stored.status,'ended');
+  assert.equal(stored.endedReason,'device_revoked');
+  assert.equal(Object.hasOwn(stored,'endReason'),false);
+  const after=await(await f.call(path,'GET',null,f.token)).json();
+  assert.equal(after.endReason,'device_revoked');
+  assert.equal(after.endedReason,'device_revoked');
 });

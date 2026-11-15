@@ -1,5 +1,8 @@
 import { readFileSync } from 'node:fs';
 export function config(env = process.env) {
+  if (env.NODE_ENV === 'production' && !env.DB_PATH?.trim()) {
+    throw new Error('Set DB_PATH explicitly for production, using a persistent volume path.');
+  }
   const number = (key, fallback, min, max) => {
     const value = Number(env[key] ?? fallback);
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`Invalid ${key}`);
@@ -20,6 +23,9 @@ export function config(env = process.env) {
   if(![5,10].includes(freshnessPriority))throw Error('Invalid APNS_FRESHNESS_PRIORITY');
   const c = {
     freshnessPriority,
+    autoEnd: flag('ENABLE_AUTO_END'),
+    requireProxyHTTPS: flag('REQUIRE_PROXY_HTTPS'),
+    endDismissalSeconds: number('END_DISMISSAL_SECONDS', 900, 0, 14400),
     port: number('PORT', 3000, 1, 65535), db: env.DB_PATH ?? './data/server.sqlite',
     attestEnabled, inviteEnabled, clientIPMode,
     attestAllowDevelopment: flag('APP_ATTEST_ALLOW_DEVELOPMENT'),
@@ -27,6 +33,8 @@ export function config(env = process.env) {
     invite: env.INVITE_CODE, mode, projections: env.ENABLE_ESTIMATES === 'true',
     pushConcurrency: number('APNS_MAX_CONCURRENT_SENDS', 4, 1, 16),
     pollMs: number('POLL_SECONDS', 75, 60, 90) * 1000,
+    deviceIdleDays: number('DEVICE_IDLE_DAYS', 60, 2, 3650),
+    deviceIdleReaping: flag('ENABLE_DEVICE_IDLE_REAPING'),
     maxDevices: number('MAX_DEVICES', 50, 1, 1000), maxActivities: number('MAX_ACTIVITIES', 100, 1, 1000),
     ingressPerIP: number('API_REQUESTS_PER_IP_PER_MINUTE', 400, 1, 10000),
     ingressGlobal: number('API_REQUESTS_PER_MINUTE', 1200, 1, 10000),

@@ -2,6 +2,21 @@
 
 [Back to README](../README.md)
 
+## HTTPS behind Railway
+
+Set `REQUIRE_PROXY_HTTPS=true` on develop when remote requests go exclusively
+through the trusted public HTTP edge. The edge must overwrite
+`X-Forwarded-Proto`. A caller with direct or private access to the HTTP listener
+can supply this header, so keep that access limited to trusted infrastructure.
+
+With the setting enabled, the API requires HTTPS and secure responses include
+`Strict-Transport-Security: max-age=31536000` for the current host. The local
+`/health` probe still accepts HTTP. The setting defaults to false for local use.
+
+After enabling it on develop, confirm the deployment health check passes,
+HTTPS `/health` returns 200 with the HSTS header, and the signed app can check
+its registration and load a matchup. Send no credentials over plain HTTP.
+
 ## Storage and backups
 
 SQLite stores device credential hashes and activity registrations. This design
@@ -44,23 +59,24 @@ silently restored. No real backup cleanup was run while developing this feature.
 ## Device revocation
 
 Users can revoke their current credential through authenticated
-`DELETE /v1/devices/me`. Operators can revoke a device without its bearer token
-using `npm run revoke-device -- --server-stopped <32-character-device-id>`.
+`DELETE /v1/devices/me`. Operators can revoke a credential from the service
+container using its existing `DB_PATH`:
 
-The operator command is **offline only**: stop the server process first, back up
-its database, explicitly set `DB_PATH` to that existing database, run the command,
-and restart the server. `--server-stopped` is an operator acknowledgement, not a
-process detector. Never run it against a database used by a live server: the
-running credential index would remain stale. A restarted server rebuilds the
-index and rejects the revoked credential. Do not copy database contents or tokens
-into chat or logs; the command prints only a result and activity count.
+```bash
+npm run revoke-device -- --live <32-character-device-id>
+```
+
+Use `--live` after deploying a server version that refreshes its credential
+index when another SQLite connection commits. The next authenticated lookup
+then rejects the old credential. The poller handles queued end pushes on its
+next tick. Use `--server-stopped` with older server versions or when operating
+on a stopped instance. Keep the database and device credentials private.
 
 Revocation retains the device/attestation-key record to block key reuse, and queues
-owned active Live Activities for end pushes. Pushes are attempted after restart;
-Apple acceptance or immediate disappearance from the phone is not guaranteed.
+owned active Live Activities for end pushes. Apple acceptance and delivery to
+the phone are separate events.
 Other devices are unaffected. Repeated revocation is safe. This revokes one device
 credential, not a Sleeper username or a person's ability to enroll a different key.
-No public administration endpoint or automatic device-record deletion is introduced.
 
 Every successful storage transaction removes the bearer credential hash and stored
 attestation public key from revoked records. This includes older revoked records
@@ -68,9 +84,27 @@ on the next normal write (such as poller housekeeping). Active device records ar
 unchanged. Revoked device IDs, attestation key IDs, and revocation flags remain to
 prevent key reuse; pending activity end tokens remain until their lifecycle finishes.
 This is logical data minimization, not secure erasure: older SQLite pages, WAL files,
-and backups can retain previous values. No automatic deletion of replay-blocking
-records or age-based expiration of active devices is performed. Long-term retention
-and growth of those records still need an explicit policy.
+and backups can retain previous values.
+
+## Inactive device credentials
+
+The poller checks for inactive devices on startup and about once a day.
+`DEVICE_IDLE_DAYS` defaults to 60 and accepts whole days from 2 to 3650.
+Successful authenticated requests refresh the last-used time at most once a day.
+Existing records without a last-used time get a full inactivity window from their
+first poll. Devices with active, ending, or awaiting-token activities and revoked
+records are excluded.
+
+With `ENABLE_DEVICE_IDLE_REAPING=false` (the default), the poller logs
+`device_idle_candidates` with the count and threshold. Run in this mode for a week
+and verify Reconnect on a signed iPhone in develop using a test registration
+removed by the reaper before enabling it in production.
+
+When `ENABLE_DEVICE_IDLE_REAPING=true`, qualifying device records are removed
+and the poller logs `device_idle_expired` with the count and threshold. Their old
+credentials receive HTTP 401. Reconnect performs fresh enrollment. Ended activity
+records are still removed by the normal activity cleanup. Turning the flag off
+stops further expiration. Previously expired devices still require enrollment.
 
 ## User-initiated device-data deletion
 

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import cbor from 'cbor';
 import { enrollmentRouter, verifyAppleAttestation } from '../enrollment.js';
 import { openStore } from '../registrations.js';
@@ -24,7 +25,7 @@ async function fixture(t, options = {}) {
       if (input.attestation.toString() !== 'test-proof' || options.reject) throw Error('rejected');
       return { keyId: input.keyId, publicKey: 'test-only-public-key', environment: options.environment ?? 'production' };
     } }));
-  app.use((e, req, res, next) => res.status(e.status ?? 500).json({error: e.message}));
+  app.use((e, _req, res, _next) => res.status(e.status ?? 500).json({error: e.message}));
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); store.close(); });
@@ -49,6 +50,7 @@ test('attested enrollment stores only a hash and retry returns same device witho
   const state = f.store.read();
   assert.equal(Object.keys(state.devices).length, 1);
   assert.equal(state.devices[c.challengeId].hash, hash(c.secret));
+  assert.equal(state.devices[c.challengeId].lastSeenAt, state.devices[c.challengeId].createdAt);
   assert.equal(JSON.stringify(state).includes(c.secret), false);
   assert.equal((await f.post('complete', {...body, attestation: Buffer.from('other-proof').toString('base64')})).status, 403);
   // Verify compatibility with the existing bearer-authenticated API.
@@ -118,6 +120,35 @@ test('public enrollment has global and per-IP request limits', async t => {
     headers:{'content-type':'application/json', 'x-forwarded-for':`192.0.2.${i+1}`},body:'{}'});
   assert.equal(last.status, 429);
 });
+test('real verifier accepts an Apple-signed production fixture and checks challenge, identity and expiry', () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL('./fixtures/node-app-attest/attestation-production.json', import.meta.url), 'utf8',
+  ));
+  const input = {
+    attestation: Buffer.from(fixture.attestation, 'base64'),
+    challenge: Buffer.from(fixture.challenge, 'base64'),
+    keyId: fixture.keyId,
+    cfg: {
+      bundleId: 'io.uebelacker.AppAttestExample',
+      attestAppIdPrefix: 'V8H6LQ9448',
+      attestAllowDevelopment: false,
+    },
+    // Inside the fixed validity window of both certificates in the fixture.
+    now: Date.parse('2024-06-01T00:00:00Z'),
+  };
+  const result = verifyAppleAttestation(input);
+  assert.equal(result.keyId, fixture.keyId);
+  assert.equal(result.environment, 'production');
+  assert.match(result.publicKey, /-----BEGIN PUBLIC KEY-----/);
+  assert.throws(() => verifyAppleAttestation({...input, challenge: 'different challenge'}), /nonce/i);
+  assert.throws(() => verifyAppleAttestation({
+    ...input, cfg: {...input.cfg, bundleId: 'com.example.other'},
+  }), /appId|rpId|bundle|hash/i);
+  assert.throws(() => verifyAppleAttestation({
+    ...input, now: Date.parse('2025-01-01T00:00:00Z'),
+  }), /Expired certificate/);
+});
+
 test('real verifier rejects garbage, wrong format, deeply nested CBOR and untrusted certificates', () => {
   let nested = 'x'; for(let i=0;i<25;i++) nested=[nested];
   const badCerts = {fmt:'apple-appattest', authData:Buffer.alloc(90),attStmt:{x5c:[Buffer.from('fake'),Buffer.from('fake')]}};

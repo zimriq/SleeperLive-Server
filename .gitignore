@@ -8,3 +8,4 @@ data/
 *.sqlite*
 *.zip
 .DS_Store
+/PRE_APP_STORE_SERVER_REVIEW.md

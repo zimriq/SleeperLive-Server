@@ -1,5 +1,5 @@
 import { DatabaseSync, backup } from 'node:sqlite';
-import { chmodSync, linkSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
+import { chmodSync, linkSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -52,7 +52,7 @@ export async function createBackup({path,dir,days=null,now=Date.now()}) {
     linkSync(partial,output);
   }finally{
     db.close();
-    try{unlinkSync(partial);}catch(error){if(error.code!=='ENOENT')throw error;}
+    rmSync(partial,{force:true});
   }
   const removed=prune({dir,path,keep:output,days,now});
   return {output,removed,days};

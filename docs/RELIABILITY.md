@@ -82,8 +82,19 @@ outgrows its limit, inspect its size and adjust deliberately.
   not confirmation that the phone displayed the update.
 - End locally in the app, then DELETE the registration. Server also expires it eight
   hours after its actual start. A Sunday activity must be restarted for Monday.
-- No automatic game-final ending yet. Final scores may receive heartbeat pushes
-  until expiry or the user ends the activity.
+- Set `ENABLE_AUTO_END=true` on develop to trial automatic endings independently
+  of estimates. The poller uses the regular-season scoreboard and Sleeper player
+  catalog to confirm that both lineups' occupied starter slots map to final games
+  or explicit byes. Missing or uncertain game data leaves the normal expiry in place.
+- Once completion is confirmed, the poller needs two consecutive unchanged
+  comparisons between fresh score polls, or a fresh score at least ten minutes
+  after it first observed continuous completion. A previously completed week
+  follows the same checks. The end push carries the latest score snapshot and
+  logs `event=auto_end` with `reason=matchup_final` when queued.
+- `END_DISMISSAL_SECONDS` defaults to 900 (15 minutes) and accepts 0–14,400
+  seconds. It sets the requested Lock Screen dismissal time on end pushes.
+  Verify the end push, final score, and dismissal on a signed iPhone through a
+  real game window on develop before enabling this feature in production.
 - Once sent, the network may still deliver a push after the user ends locally;
   the server prevents subsequent work for ended activities.
 - At-least-once retry: a crash between Apple accepting a push and the database
@@ -129,12 +140,11 @@ IP or global allowance. Accepted requests still count toward both shared ceiling
 429 responses include `Retry-After`; the ingress rejection also uses `no-store`.
 `/health` remains outside these budgets.
 
-`GET /health` is a public liveness check returning only `ok` and the APNs `mode`
-(`live` or `dry-run`), with `Cache-Control: no-store`. The iOS app uses these fields.
-It does not expose polling timestamps, raw errors, credentials, or database details.
-A successful response means the HTTP service is responding, not that the database,
-Sleeper feeds, polling loop, or Apple push delivery are healthy. It is not a
-readiness check and does not trigger database reads or upstream requests.
+`GET /health` returns `ok` and the APNs `mode` with
+`Cache-Control: no-store`. When more than three poll intervals pass without a
+completed tick, including the startup grace period, it returns 503 with `ok: false`. A tick can
+complete during an upstream outage, so check the push and upstream logs when
+diagnosing score delivery. The health route uses in-memory poller state.
 
 The downstream counters reserve separate capacity: 1,000 authenticated-device
 counters, 3,998 enrollment IP counters (shared by private and App Attest enrollment),

@@ -13,7 +13,7 @@ test('APNs selects and signs with the correct environment key', async t => {
   const requests = [];
   t.mock.method(http2, 'connect', host => {
     const session = new EventEmitter();
-    session.destroy = session.close = () => {};
+    session.destroy = session.close = session.setTimeout = () => {};
     session.request = headers => {
       requests.push({host,headers});
       const req = new EventEmitter();

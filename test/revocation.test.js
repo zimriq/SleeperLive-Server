@@ -1,11 +1,16 @@
 import test from 'node:test';
 import {DatabaseSync} from 'node:sqlite';
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {once} from 'node:events';
+import {createApp} from '../app.js';
+import {fileURLToPath} from 'node:url';
 import {mkdtempSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {openStore} from '../registrations.js';
-import {revokeDevice,revokeOffline} from '../revoke-device.js';
+import {revokeDevice,revokeFromDatabase} from '../revoke-device.js';
 const id='a'.repeat(32),other='b'.repeat(32);
 function seed(store){store.change(s=>{
   s.devices[id]={hash:'secret-hash',attestKeyId:'retained-key',attestPublicKey:'old-public-key'};
@@ -38,13 +43,13 @@ test('revocation removes access, preserves replay protection and only queues own
 test('offline command validates inputs and persists revocation across restart',()=>{
   const dir=mkdtempSync(join(tmpdir(),'offline-revoke-')),path=join(dir,'state.sqlite');
   try{
-    assert.throws(()=>revokeOffline(['--server-stopped',id],{DB_PATH:path}));
+    assert.throws(()=>revokeFromDatabase(['--server-stopped',id],{DB_PATH:path}));
     assert.equal(existsSync(path),false);
     let store=openStore(path);seed(store);store.close();
-    assert.throws(()=>revokeOffline([id],{DB_PATH:path}));
-    assert.throws(()=>revokeOffline(['--server-stopped','bad'],{DB_PATH:path}));
-    assert.throws(()=>revokeOffline(['--server-stopped',id],{}));
-    assert.deepEqual(revokeOffline(['--server-stopped',id],{DB_PATH:path}),{found:true,activitiesQueued:1});
+    assert.throws(()=>revokeFromDatabase([id],{DB_PATH:path}));
+    assert.throws(()=>revokeFromDatabase(['--server-stopped','bad'],{DB_PATH:path}));
+    assert.throws(()=>revokeFromDatabase(['--server-stopped',id],{}));
+    assert.deepEqual(revokeFromDatabase(['--server-stopped',id],{DB_PATH:path}),{found:true,activitiesQueued:1});
     store=openStore(path);
     assert.equal(store.credentialHash(id),undefined);
     assert.equal(store.credentialHash(other),'other-hash');store.close();
@@ -76,4 +81,39 @@ test('legacy revoked records are minimized only on commit, with replay IDs retai
     store.close();store=openStore(path);
     assert.deepEqual(store.read(),cleaned);
   }finally{store.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('live revocation command invalidates an already-loaded credential on the next request',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'live-revoke-')),path=join(dir,'state.sqlite');
+  const serverStore=openStore(path);
+  const app=createApp({cfg:{mode:'dry-run'},store:serverStore});
+  const server=app.listen(0,'127.0.0.1');
+  t.after(async()=>{
+    await new Promise(resolve=>server.close(resolve));
+    serverStore.close();
+    rmSync(dir,{recursive:true,force:true});
+  });
+  await once(server,'listening');
+  seed(serverStore);
+  const secret='c'.repeat(64);
+  serverStore.change(s=>{s.devices[id].hash=createHash('sha256').update(secret).digest('hex');});
+  const url=`http://127.0.0.1:${server.address().port}/v1/devices/me`;
+  const request=()=>fetch(url,{headers:{authorization:`Bearer ${id}.${secret}`,connection:'close'}});
+  const before=await request();
+  assert.equal(before.status,200);
+  await before.json();
+
+  const command=fileURLToPath(new URL('../revoke-device.js',import.meta.url));
+  const result=execFileSync(process.execPath,[command,'--live',id],{
+    env:{DB_PATH:path},
+    encoding:'utf8',
+  });
+  assert.match(result,/Device revoked. Activities queued to end: 1/);
+  const after=await request();
+  assert.equal(after.status,401);
+  await after.json();
+  assert.equal(serverStore.credentialHash(id),undefined);
+  assert.equal(serverStore.credentialHash(other),'other-hash');
+  assert.equal(serverStore.read().activities.active.status,'ending');
+  assert.equal(serverStore.read().devices[id].attestKeyId,'retained-key');
 });

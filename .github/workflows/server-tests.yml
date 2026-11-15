@@ -4,7 +4,7 @@ on:
   push:
     branches: [develop, main]
   pull_request:
-    branches: [main]
+    branches: [develop, main]
   workflow_dispatch:
 
 permissions:
@@ -25,9 +25,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.22.3'
           cache: npm
       - name: Install locked dependencies
-        run: npm ci
+        run: npm ci --no-audit
+      - name: Lint server code
+        run: npm run lint
       - name: Run server tests
         run: npm test
+      - name: Audit locked dependencies
+        run: npm audit --audit-level=high
